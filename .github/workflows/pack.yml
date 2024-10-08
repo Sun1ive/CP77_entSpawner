@@ -6,6 +6,8 @@ on:
       - main
       - nodes
       - dev/nodes
+      - "feature/*"
+      - "fix/*"
   workflow_dispatch:
 
 jobs:
