@@ -6,6 +6,8 @@ on:
       - main
       - nodes
       - dev/nodes
+      - "feature/*"
+      - "fix/*"
   workflow_dispatch:
 
 jobs:
@@ -17,6 +19,7 @@ jobs:
       - name: Setup folders
         run: |
           cd ${{ github.workspace }}
+          ls -la data/objects
           sudo mkdir -p /entSpawnerPacked/archive/pc/mod
           sudo mkdir -p /entSpawnerPacked/bin/x64/plugins/cyber_engine_tweaks/mods/entSpawner/
       - name: Copy files
@@ -30,5 +33,5 @@ jobs:
       - name: Upload zip
         uses: actions/upload-artifact@v4
         with:
-            name: entSpawnerPacked
-            path: /entSpawnerPacked/
+          name: entSpawnerPacked
+          path: /entSpawnerPacked/
