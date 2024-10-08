@@ -19,6 +19,7 @@ jobs:
       - name: Setup folders
         run: |
           cd ${{ github.workspace }}
+          ls -la data/objects
           sudo mkdir -p /entSpawnerPacked/archive/pc/mod
           sudo mkdir -p /entSpawnerPacked/bin/x64/plugins/cyber_engine_tweaks/mods/entSpawner/
       - name: Copy files
