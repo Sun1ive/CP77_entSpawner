@@ -33,7 +33,7 @@ function positionable:new(sUI)
 	o.class = utils.combine(o.class, { "positionable" })
 
 	setmetatable(o, { __index = self })
-   	return o
+	return o
 end
 
 function positionable:load(data, silent)
@@ -65,6 +65,37 @@ function positionable:drawTransform()
 	end
 end
 
+function positionable:drawWkitHelper()
+	local position = self:getPosition()
+	local rotation = self:getRotation()
+	local quat = rotation:ToQuat()
+
+	local function drawField(name, prop)
+		local formatText = "%.2f"
+		local text = string.gsub(string.format(formatText, prop), "%.", ",")
+		ImGui.InputTextWithHint("##" .. name, name, text, #text + 1, ImGuiInputTextFlags.ReadOnly)
+		style.tooltip(name)
+	end
+
+	ImGui.PushItemWidth(80 * style.viewSize)
+	drawField("X", position.x)
+	ImGui.SameLine()
+	drawField("Y", position.y)
+	ImGui.SameLine()
+	drawField("Z", position.z)
+	ImGui.PopItemWidth()
+
+	ImGui.PushItemWidth(80 * style.viewSize)
+	drawField("I", quat.i)
+	ImGui.SameLine()
+	drawField("J", quat.j)
+	ImGui.SameLine()
+	drawField("K", quat.k)
+	ImGui.SameLine()
+	drawField("R", quat.r)
+	ImGui.PopItemWidth()
+end
+
 function positionable:getProperties()
 	local properties = element.getProperties(self)
 
@@ -72,8 +103,17 @@ function positionable:getProperties()
 		id = "transform",
 		name = "Transform",
 		defaultHeader = true,
-		draw = function ()
+		draw = function()
 			self:drawTransform()
+		end
+	})
+
+	table.insert(properties, {
+		id = "wkitHelper",
+		name = "WKit Helper",
+		defaultHeader = true,
+		draw = function()
+			self:drawWkitHelper()
 		end
 	})
 
@@ -124,7 +164,8 @@ function positionable:drawProp(prop, name, axis)
 		formatText = "%.3f"
 	end
 
-    local newValue, changed = ImGui.DragFloat("##" .. name, prop, steps, -99999, 99999, formatText .. " " .. name, ImGuiSliderFlags.NoRoundToFormat)
+	local newValue, changed = ImGui.DragFloat("##" .. name, prop, steps, -99999, 99999, formatText .. " " .. name,
+		ImGuiSliderFlags.NoRoundToFormat)
 	self.controlsHovered = (ImGui.IsItemHovered() or ImGui.IsItemActive()) or self.controlsHovered
 	if (ImGui.IsItemHovered() or ImGui.IsItemActive()) and axis ~= self.visualizerDirection then
 		self:setVisualizerDirection(axis)
@@ -139,7 +180,7 @@ function positionable:drawProp(prop, name, axis)
 		history.addAction(history.getElementChange(self))
 		history.propBeingEdited = true
 	end
-    if changed or finished then
+	if changed or finished then
 		if axis == "x" then
 			self:setPosition(Vector4.new(newValue - prop, 0, 0, 0))
 		elseif axis == "y" then
@@ -168,57 +209,57 @@ function positionable:drawProp(prop, name, axis)
 		elseif axis == "scaleZ" then
 			self:setScale({ x = 0, y = 0, z = newValue - prop }, finished)
 		end
-    end
+	end
 end
 
 ---@protected
 function positionable:drawPosition(position)
 	ImGui.PushItemWidth(80 * style.viewSize)
 	self:drawProp(position.x, "X", "x")
-    ImGui.SameLine()
+	ImGui.SameLine()
 	self:drawProp(position.y, "Y", "y")
-    ImGui.SameLine()
+	ImGui.SameLine()
 	self:drawProp(position.z, "Z", "z")
-    ImGui.PopItemWidth()
+	ImGui.PopItemWidth()
 
-    ImGui.SameLine()
-    style.pushButtonNoBG(true)
-    if ImGui.Button(IconGlyphs.AccountArrowLeftOutline) then
+	ImGui.SameLine()
+	style.pushButtonNoBG(true)
+	if ImGui.Button(IconGlyphs.AccountArrowLeftOutline) then
 		history.addAction(history.getElementChange(self))
 		local pos = Game.GetPlayer():GetWorldPosition()
-        self:setPosition(Vector4.new(pos.x - position.x, pos.y - position.y, pos.z - position.z, 0))
-    end
-    style.pushButtonNoBG(false)
+		self:setPosition(Vector4.new(pos.x - position.x, pos.y - position.y, pos.z - position.z, 0))
+	end
+	style.pushButtonNoBG(false)
 	if ImGui.IsItemHovered() then style.setCursorRelative(5, 5) end
 	style.tooltip("Set to player position")
 end
 
 ---@protected
 function positionable:drawRelativePosition()
-    ImGui.PushItemWidth(80 * style.viewSize)
+	ImGui.PushItemWidth(80 * style.viewSize)
 	style.pushGreyedOut(not self.visible or self.hiddenByParent)
-    self:drawProp(0, "Rel X", "relX")
+	self:drawProp(0, "Rel X", "relX")
 	ImGui.SameLine()
-    self:drawProp(0, "Rel Y", "relY")
+	self:drawProp(0, "Rel Y", "relY")
 	ImGui.SameLine()
-    self:drawProp(0, "Rel Z", "relZ")
+	self:drawProp(0, "Rel Z", "relZ")
 	style.popGreyedOut(not self.visible or self.hiddenByParent)
-    ImGui.PopItemWidth()
+	ImGui.PopItemWidth()
 end
 
 ---@protected
 function positionable:drawRotation(rotation)
-    ImGui.PushItemWidth(80 * style.viewSize)
-    self:drawProp(rotation.roll, "Roll", "roll")
-    ImGui.SameLine()
-    self:drawProp(rotation.pitch, "Pitch", "pitch")
-    ImGui.SameLine()
+	ImGui.PushItemWidth(80 * style.viewSize)
+	self:drawProp(rotation.roll, "Roll", "roll")
+	ImGui.SameLine()
+	self:drawProp(rotation.pitch, "Pitch", "pitch")
+	ImGui.SameLine()
 	self:drawProp(rotation.yaw, "Yaw", "yaw")
-    ImGui.SameLine()
+	ImGui.SameLine()
 
 	self.rotationRelative, _ = style.toggleButton(IconGlyphs.HorizontalRotateClockwise, self.rotationRelative)
 	style.tooltip("Toggle relative rotation")
-    ImGui.PopItemWidth()
+	ImGui.PopItemWidth()
 end
 
 function positionable:drawScale(scale)
