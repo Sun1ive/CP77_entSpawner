@@ -3,7 +3,9 @@ local utils = require("modules/utils/core/utils")
 local history = require("modules/utils/project/history")
 local registry = require("modules/utils/game/nodeRefRegistry")
 local red = require("modules/utils/interop/redConverter")
+local redValue = require("modules/utils/data/redValue")
 local data = require("modules/utils/data/deviceOperations")
+local deviceActions = require("modules/utils/data/deviceActions")
 local audioData = require("modules/utils/data/audioData")
 local soundSelector = require("modules/utils/ui/soundSelector")
 
@@ -23,13 +25,10 @@ local quickDeviceOperationsSetupUI = {
 }
 
 ---@param device table
----@param options table?
-function quickDeviceOperationsSetupUI.install(device, options)
+function quickDeviceOperationsSetupUI.install(device)
     if not device then
         return
     end
-
-    options = options or {}
 
     local actionClassCache = nil
 
@@ -103,7 +102,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
     ---@param operation table? Operation `Data`
     ---@return string
     local function operationName(operation)
-        return data.readCName(readPath(operation, { "operationName" }))
+        return redValue.readCName(readPath(operation, { "operationName" }))
     end
 
     -- Field rendering ---------------------------------------------------------------------------
@@ -322,7 +321,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
                 empty = "This entity registers no effects, so there is no name to start."
             }
         elseif field.selector == "customAction" then
-            local componentID = self:getDeviceOperationsComponentID()
+            local componentID = self:getPersistentComponentID(self, self.deviceClassName)
             local entries = componentID
                 and self:getComponentPathArray(self, componentID, data.CUSTOM_ACTIONS_PATH)
                 or {}
@@ -346,13 +345,13 @@ function quickDeviceOperationsSetupUI.install(device, options)
             local hasInteraction = #data.getComponents(self, "gameinteractionsComponent") > 0
 
             return {
-                options = data.getInteractionAreaTags(),
+                options = deviceActions.getAreaTags(),
                 hint = "Search tag...",
                 tooltip = "Layer on the entity's interaction component. LogicArea is the 35m proximity layer nearly every device carries.",
                 verify = false,
                 matchWidth = true,
-                annotationFn = data.annotateInteractionAreaTag,
-                tooltipFn = data.describeInteractionAreaTag,
+                annotationFn = deviceActions.annotateAreaTag,
+                tooltipFn = deviceActions.describeAreaTag,
                 warn = not hasInteraction
                     and "This entity carries no gameinteractionsComponent, so no interaction layer can raise this trigger."
                     or nil
@@ -409,13 +408,13 @@ function quickDeviceOperationsSetupUI.install(device, options)
         self.deviceOperationsFieldShowAll = self.deviceOperationsFieldShowAll or {}
 
         if field.kind == "cname" or field.kind == "tweakdbid" then
-            local currentText = field.kind == "cname" and data.readCName(current) or data.readRawValue(current)
+            local currentText = field.kind == "cname" and redValue.readCName(current) or redValue.readRawValue(current)
             local selector = resolveSelector(self, field, currentText)
 
             ---@param text string
             ---@return table value The RED JSON form this field stores
             local function encode(text)
-                return field.kind == "cname" and data.cname(text) or data.tweakDBID(text)
+                return field.kind == "cname" and redValue.cName(text) or redValue.tweakDBID(text)
             end
 
             if selector and selector.sound then
@@ -490,14 +489,14 @@ function quickDeviceOperationsSetupUI.install(device, options)
             end
 
         elseif field.kind == "noderef" then
-            local newValue, finished = registry.drawNodeRefSelector(width, data.readRawValue(current), self.object, false)
+            local newValue, finished = registry.drawNodeRefSelector(width, redValue.readRawValue(current), self.object, false)
             if finished then
-                writePath(owner, field.path, data.nodeRef(newValue))
+                writePath(owner, field.path, redValue.nodeRef(newValue))
                 changed, settled = true, true
             end
 
         elseif field.kind == "bool" then
-            local newValue, didChange = style.trackedCheckbox(self.object, "##field", data.readBool(current))
+            local newValue, didChange = style.trackedCheckbox(self.object, "##field", redValue.readBool(current))
             if didChange then
                 writePath(owner, field.path, newValue and 1 or 0)
                 changed, settled = true, true
@@ -552,7 +551,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
             -- subclasses the unscoped list offers. Picking one of the other 303 is a trigger that can
             -- never fire, and nothing at runtime says so.
             local scoped = field.selector == "deviceAction"
-                and data.getDeviceActions(self.deviceClassName)
+                and deviceActions.forDevice(self.deviceClassName)
                 or nil
             -- A controller the table does not know (a modded one) resolves to nothing, and then the
             -- full list is not a fallback, it is the only honest answer.
@@ -603,7 +602,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
                         return scoped.category[optionText] or ""
                     end or nil,
                     optionTooltipFn = function (optionText)
-                        return data.describeDeviceAction(optionText, scoped and scoped.category[optionText] or nil)
+                        return deviceActions.describe(optionText, scoped and scoped.category[optionText] or nil)
                     end
                 }
             )
@@ -672,11 +671,6 @@ function quickDeviceOperationsSetupUI.install(device, options)
 
     -- Container access ----------------------------------------------------------------------------
 
-    ---@return string?
-    function device:getDeviceOperationsComponentID()
-        return self:getPersistentComponentID(self, self.deviceClassName)
-    end
-
     ---@param componentID string
     ---@return boolean
     function device:hasDeviceOperationsContainer(componentID)
@@ -704,10 +698,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
             if generated == "" then return false end
 
             self.nodeRef = generated
-            registry.invalidate()
-            if self.object.sUI and self.object.sUI.cachePaths then
-                self.object.sUI.cachePaths()
-            end
+            self:refreshNodeRefCaches()
         end
 
         self.persistent = true
@@ -730,18 +721,6 @@ function quickDeviceOperationsSetupUI.install(device, options)
         self:updateComponentPathValue(self, componentID, data.CONTAINER_PATH, nil)
     end
 
-    ---@param componentID string
-    ---@return table[]
-    function device:getDeviceOperationsList(componentID)
-        return self:getComponentPathArray(self, componentID, data.OPERATIONS_PATH)
-    end
-
-    ---@param componentID string
-    ---@return table[]
-    function device:getDeviceOperationTriggerList(componentID)
-        return self:getComponentPathArray(self, componentID, data.TRIGGERS_PATH)
-    end
-
     ---Rewrite every reference to `oldName`, so renaming an operation cannot silently orphan the
     ---triggers that run it. Covers both reference sites: a trigger's `operationsToExecute` and an
     ---operation's own `toggleOperations`.
@@ -754,8 +733,8 @@ function quickDeviceOperationsSetupUI.install(device, options)
             local triggerData = handleData(handleData(trigger) and readPath(handleData(trigger), { "triggerData" }))
             for _, execution in ipairs(triggerData and readPath(triggerData, { "operationsToExecute" }) or {}) do
                 local execData = handleData(execution)
-                if execData and data.readCName(readPath(execData, { "operationName" })) == oldName then
-                    writePath(execData, { "operationName" }, data.cname(newName))
+                if execData and redValue.readCName(readPath(execData, { "operationName" })) == oldName then
+                    writePath(execData, { "operationName" }, redValue.cName(newName))
                 end
             end
         end
@@ -763,8 +742,8 @@ function quickDeviceOperationsSetupUI.install(device, options)
         for _, operation in ipairs(operations) do
             local operationData = handleData(operation)
             for _, toggle in ipairs(operationData and readPath(operationData, { "toggleOperations" }) or {}) do
-                if data.readCName(readPath(toggle, { "operationName" })) == oldName then
-                    writePath(toggle, { "operationName" }, data.cname(newName))
+                if redValue.readCName(readPath(toggle, { "operationName" })) == oldName then
+                    writePath(toggle, { "operationName" }, redValue.cName(newName))
                 end
             end
         end
@@ -795,7 +774,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
         style.styledTextWrapped(IconGlyphs.Flask .. " Experimental feature : the Device Operations manager is a work in progress. It is not yet fully tested and may have bugs or incomplete functionality.", style.activeColor)
 
 
-        local componentID = self:getDeviceOperationsComponentID()
+        local componentID = self:getPersistentComponentID(self, self.deviceClassName)
 
         if not componentID then
             ImGui.TextWrapped("Device state is not available yet. Ensure the device is spawned and assembled.")
@@ -822,8 +801,8 @@ function quickDeviceOperationsSetupUI.install(device, options)
             self:ensureDeviceOperationsPersistent()
         end
 
-        local operations = self:getDeviceOperationsList(componentID)
-        local triggers = self:getDeviceOperationTriggerList(componentID)
+        local operations = self:getComponentPathArray(self, componentID, data.OPERATIONS_PATH)
+        local triggers = self:getComponentPathArray(self, componentID, data.TRIGGERS_PATH)
 
         self:drawDeviceOperationsWarnings(componentID, operations, triggers)
 
@@ -900,13 +879,17 @@ function quickDeviceOperationsSetupUI.install(device, options)
         -- template creates, and there is no name field here for the author to notice a space in.
         local built = template.build(data.sanitizeOperationName(utils.sanitizeText(self.deviceOperationsTemplatePrefix or "")))
 
-        local operations = self:hasDeviceOperationsContainer(componentID) and self:getDeviceOperationsList(componentID) or {}
-        local triggers = self:hasDeviceOperationsContainer(componentID) and self:getDeviceOperationTriggerList(componentID) or {}
+        local operations = self:hasDeviceOperationsContainer(componentID)
+            and self:getComponentPathArray(self, componentID, data.OPERATIONS_PATH)
+            or {}
+        local triggers = self:hasDeviceOperationsContainer(componentID)
+            and self:getComponentPathArray(self, componentID, data.TRIGGERS_PATH)
+            or {}
 
         for _, spec in ipairs(built.operations) do
             local handle = makeHandle(spec.class)
             if handle then
-                writePath(handle.Data, { "operationName" }, data.cname(spec.name))
+                writePath(handle.Data, { "operationName" }, redValue.cName(spec.name))
 
                 for _, entry in ipairs(spec.set or {}) do
                     if entry.listItem then
@@ -936,7 +919,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
                 for _, name in ipairs(spec.runs or {}) do
                     local execution = makeHandle(data.EXECUTION_CLASS)
                     if execution then
-                        writePath(execution.Data, { "operationName" }, data.cname(name))
+                        writePath(execution.Data, { "operationName" }, redValue.cName(name))
                         table.insert(executions, execution)
                     end
                 end
@@ -976,7 +959,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
                 table.insert(names, operationName(operationData))
                 if operationData["$type"] == "PlaySoundDeviceOperation" then usesSound = true end
                 for _, toggle in ipairs(readPath(operationData, { "toggleOperations" }) or {}) do
-                    referenced[data.readCName(readPath(toggle, { "operationName" }))] = true
+                    referenced[redValue.readCName(readPath(toggle, { "operationName" }))] = true
                 end
             end
         end
@@ -985,7 +968,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
             local triggerData = handleData(readPath(handleData(trigger) or {}, { "triggerData" }))
             for _, execution in ipairs(triggerData and readPath(triggerData, { "operationsToExecute" }) or {}) do
                 local execData = handleData(execution)
-                if execData then referenced[data.readCName(readPath(execData, { "operationName" }))] = true end
+                if execData then referenced[redValue.readCName(readPath(execData, { "operationName" }))] = true end
             end
         end
 
@@ -1116,7 +1099,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
                     if finished and newName ~= name then
                         -- Rename both sides at once: leaving the references behind is exactly the
                         -- silent breakage this panel exists to prevent.
-                        writePath(operationData, { "operationName" }, data.cname(newName))
+                        writePath(operationData, { "operationName" }, redValue.cName(newName))
                         retargetReferences(triggers, operations, name, newName)
                         commit(operations, true, triggers)
                     end
@@ -1129,21 +1112,21 @@ function quickDeviceOperationsSetupUI.install(device, options)
                         style.tooltip(problem)
                     end
 
-                    local enabled, enabledChanged = style.trackedCheckbox(self.object, "Enabled##operationEnabled", data.readBool(operationData.isEnabled))
+                    local enabled, enabledChanged = style.trackedCheckbox(self.object, "Enabled##operationEnabled", redValue.readBool(operationData.isEnabled))
                     if enabledChanged then
                         operationData.isEnabled = enabled and 1 or 0
                         commit(operations, true)
                     end
 
                     ImGui.SameLine()
-                    local once, onceChanged = style.trackedCheckbox(self.object, "Run once##operationOnce", data.readBool(operationData.executeOnce))
+                    local once, onceChanged = style.trackedCheckbox(self.object, "Run once##operationOnce", redValue.readBool(operationData.executeOnce))
                     if onceChanged then
                         operationData.executeOnce = once and 1 or 0
                         commit(operations, true)
                     end
 
                     ImGui.SameLine()
-                    local disables, disablesChanged = style.trackedCheckbox(self.object, "Disable device##operationDisable", data.readBool(operationData.disableDevice))
+                    local disables, disablesChanged = style.trackedCheckbox(self.object, "Disable device##operationDisable", redValue.readBool(operationData.disableDevice))
                     if disablesChanged then
                         operationData.disableDevice = disables and 1 or 0
                         commit(operations, true)
@@ -1176,7 +1159,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
                     local handle = makeHandle(typeInfo.class)
                     if handle then
                         history.addAction(history.getElementChange(self.object))
-                        writePath(handle.Data, { "operationName" }, data.cname(string.format("operation_%d", #operations + 1)))
+                        writePath(handle.Data, { "operationName" }, redValue.cName(string.format("operation_%d", #operations + 1)))
                         table.insert(operations, handle)
                         commit(operations, true)
                     end
@@ -1314,7 +1297,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
                 local runs = {}
                 for _, execution in ipairs(triggerData and readPath(triggerData, { "operationsToExecute" }) or {}) do
                     local execData = handleData(execution)
-                    if execData then table.insert(runs, data.readCName(readPath(execData, { "operationName" }))) end
+                    if execData then table.insert(runs, redValue.readCName(readPath(execData, { "operationName" }))) end
                 end
 
                 local header = string.format("%s  ->  %s", data.getTriggerLabel(class),
@@ -1401,7 +1384,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
             if execData then
                 ImGui.PushID(9000 + index)
 
-                local current = data.readCName(readPath(execData, { "operationName" }))
+                local current = redValue.readCName(readPath(execData, { "operationName" }))
                 local knownIndex = utils.indexValue(operationNames, current)
 
                 if #operationNames == 0 then
@@ -1413,7 +1396,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
                     local comboIndex = math.max(0, knownIndex - 1)
                     local newIndex, didChange = style.trackedCombo(self.object, "##executionName", comboIndex, operationNames, 240)
                     if didChange then
-                        writePath(execData, { "operationName" }, data.cname(operationNames[newIndex + 1]))
+                        writePath(execData, { "operationName" }, redValue.cName(operationNames[newIndex + 1]))
                         changed, settled = true, true
                     end
                 end
@@ -1455,7 +1438,7 @@ function quickDeviceOperationsSetupUI.install(device, options)
             local execution = makeHandle(data.EXECUTION_CLASS)
             if execution then
                 history.addAction(history.getElementChange(self.object))
-                writePath(execution.Data, { "operationName" }, data.cname(operationNames[1] or ""))
+                writePath(execution.Data, { "operationName" }, redValue.cName(operationNames[1] or ""))
                 table.insert(executions, execution)
                 changed, settled = true, true
             end

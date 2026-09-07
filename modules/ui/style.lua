@@ -76,10 +76,6 @@ local function resolveSearchDropdownOptionLabel(optionText, optionDisplayFn)
     return optionText
 end
 
----@param value any
----@param helperText string?
----@param showValue boolean?
----@return string?
 ---Strips the ImGui id suffix from a widget label. `##`/`###` and everything after them
 ---are not rendered by ImGui, so they must not leak into tooltips or the clipboard either.
 ---@param value any
@@ -95,6 +91,56 @@ local function stripWidgetId(value)
     return (text:gsub("%s+$", ""))
 end
 
+---@param label string?
+---@param maxWidth number
+---@param ellipsis string?
+---@return string
+local function fitSingleLineText(label, maxWidth, ellipsis)
+    local text = tostring(label or "")
+    local suffix = ellipsis or "..."
+
+    if text == "" or maxWidth <= 0 then
+        return ""
+    end
+
+    if ImGui.CalcTextSize(text) <= maxWidth then
+        return text
+    end
+
+    while #text > 1 and ImGui.CalcTextSize(text .. suffix) > maxWidth do
+        text = text:sub(1, #text - 1)
+    end
+
+    return text .. suffix
+end
+
+---@param buttonLabels string[]?
+---@param minWidth number?
+---@return number
+function style.getRowFieldWidth(buttonLabels, minWidth)
+    local labels = buttonLabels or {}
+    local styleData = ImGui.GetStyle()
+    local framePaddingX = styleData.FramePadding.x * 2
+    local itemSpacingX = styleData.ItemSpacing.x
+    local reservedWidth = 0
+
+    for _, label in ipairs(labels) do
+        reservedWidth = reservedWidth + ImGui.CalcTextSize(stripWidgetId(label)) + framePaddingX
+    end
+
+    if #labels > 0 then
+        reservedWidth = reservedWidth + itemSpacingX * #labels
+    end
+
+    local fieldWidth = (ImGui.GetWindowContentRegionWidth() - ImGui.GetCursorPosX() - reservedWidth) / style.viewSize
+
+    return math.max(tonumber(minWidth) or 140, fieldWidth)
+end
+
+---@param value any
+---@param helperText string?
+---@param showValue boolean?
+---@return string?
 local function buildSelectorTooltip(value, helperText, showValue)
     local tooltipParts = {}
 
@@ -1115,6 +1161,76 @@ function style.dangerButton(text, ...)
     return clicked
 end
 
+---@class detailTitleAction
+---@field label string
+---@field tooltip string?
+---@field danger boolean?
+---@field disabled boolean?
+---@field onClick function?
+
+---Title row for compact selected-item panels.
+---@param icon string?
+---@param title string?
+---@param subtitle string?
+---@param action detailTitleAction?
+---@return boolean actionClicked
+function style.drawDetailTitle(icon, title, subtitle, action)
+    local styleData = ImGui.GetStyle()
+    local actionLabel = action and tostring(action.label or "") or ""
+    local actionWidth = 0
+
+    if actionLabel ~= "" then
+        actionWidth = ImGui.CalcTextSize(stripWidgetId(actionLabel)) + styleData.FramePadding.x * 2
+    end
+
+    local contentWidth = ImGui.GetWindowContentRegionWidth()
+    local subtitleText = tostring(subtitle or "")
+    local subtitleWidth = subtitleText ~= "" and ImGui.CalcTextSize(subtitleText) or 0
+    local iconText = tostring(icon or "")
+    local iconPrefix = iconText ~= "" and (iconText .. "  ") or ""
+    local iconWidth = iconPrefix ~= "" and ImGui.CalcTextSize(iconPrefix) or 0
+    local titleReserve = actionWidth
+        + (actionWidth > 0 and styleData.ItemSpacing.x * 2 or 0)
+        + (subtitleWidth > 0 and subtitleWidth + styleData.ItemSpacing.x or 0)
+        + iconWidth
+
+    ImGui.AlignTextToFramePadding()
+    style.styledText(iconPrefix .. fitSingleLineText(title, contentWidth - titleReserve), style.highlightColor)
+
+    if subtitleText ~= "" then
+        ImGui.SameLine()
+        style.mutedText(subtitleText)
+    end
+
+    local clicked = false
+    if actionLabel ~= "" and action and action.onClick then
+        ImGui.SameLine()
+        ImGui.SetCursorPosX(math.max(0, contentWidth - actionWidth))
+        ImGui.BeginDisabled(action.disabled == true)
+
+        if action.danger then
+            clicked = style.dangerButton(actionLabel)
+        else
+            clicked = ImGui.Button(actionLabel)
+        end
+
+        ImGui.EndDisabled()
+
+        if action.tooltip then
+            style.tooltip(action.tooltip)
+        end
+
+        if clicked and action.disabled ~= true then
+            action.onClick()
+        end
+    end
+
+    ImGui.Separator()
+    ImGui.Spacing()
+
+    return clicked
+end
+
 ---@class warnButtonOpts
 ---@field disabled boolean? Draw as disabled and suppress click handling.
 ---@field tooltip string? Tooltip shown when enabled.
@@ -1601,6 +1717,37 @@ function style.trackedCombo(element, text, selected, options, width, opts)
         history.addAction(history.getElementChange(element))
     end
     return newValue, changed
+end
+
+---@param element table?
+---@param id string
+---@param values string[]
+---@param current any
+---@param labels table<string, string>?
+---@param width number?
+---@param tooltip string?
+---@return string newValue
+---@return boolean changed
+function style.enumCombo(element, id, values, current, labels, width, tooltip)
+    local items = values or {}
+    local currentName = tostring(current or "")
+    local index = math.max(0, utils.indexValue(items, currentName) - 1)
+    local display = {}
+
+    for _, value in ipairs(items) do
+        table.insert(display, labels and labels[value] or value)
+    end
+
+    local newIndex, changed = style.trackedCombo(
+        element,
+        id,
+        index,
+        display,
+        width or 160,
+        tooltip and { tooltip = tooltip } or nil
+    )
+
+    return items[newIndex + 1] or currentName, changed
 end
 
 ---Show a current-value tooltip for a direct zero-based ImGui.Combo call and copy it on middle-click.

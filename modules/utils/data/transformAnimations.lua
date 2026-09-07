@@ -1,7 +1,8 @@
 local utils = require("modules/utils/core/utils")
+local redValue = require("modules/utils/data/redValue")
 
 ---Shared `gameTransformAnimatorComponent` data: the clip names the engine reserves, the schemas the
----quick setup builds its UI from, and the value helpers the popup and the device spawnable share.
+---quick setup builds its UI from.
 ---
 ---A transform animator is an array of named clips. Each clip is a timeline; each timeline item is a
 ---`startTime`, a `duration`, and one `impl` that does the actual work -- move, rotate, spawn an
@@ -120,44 +121,6 @@ transformAnimations.TRANSFORM_ANIMATION_TYPES = {
     TRANSFORM_TWO_SIDES = true
 }
 
--- Value helpers ----------------------------------------------------------------------------------
-
----@param value string?
----@return table
-function transformAnimations.cname(value)
-    return { ["$type"] = "CName", ["$storage"] = "string", ["$value"] = tostring(value or "") }
-end
-
----@param data any
----@return string
-function transformAnimations.readCName(data)
-    if type(data) ~= "table" then return "" end
-    local value = tostring(data["$value"] or "")
-    if value == "None" then return "" end
-    return value
-end
-
----@param value string?
----@return table
-function transformAnimations.nodeRef(value)
-    return { ["$type"] = "NodeRef", ["$storage"] = "string", ["$value"] = tostring(value or "") }
-end
-
----@param data any
----@return string
-function transformAnimations.readRawValue(data)
-    if type(data) ~= "table" then return "" end
-    return tostring(data["$value"] or "")
-end
-
----@param x number?
----@param y number?
----@param z number?
----@return table
-function transformAnimations.vector3(x, y, z)
-    return { ["$type"] = "Vector3", X = x or 0, Y = y or 0, Z = z or 0 }
-end
-
 ---@param data any
 ---@return number x
 ---@return number y
@@ -165,12 +128,6 @@ end
 function transformAnimations.readVector3(data)
     if type(data) ~= "table" then return 0, 0, 0 end
     return utils.toNumber(data.X, 0), utils.toNumber(data.Y, 0), utils.toNumber(data.Z, 0)
-end
-
----@param data any
----@return boolean
-function transformAnimations.readBool(value)
-    return value == 1 or value == true
 end
 
 ---`numberOfFullRotations` is stored as a fraction of a turn: 0.25 is a 90 degree swing, and the
@@ -481,7 +438,7 @@ end
 function transformAnimations.newDefinition(name)
     return {
         ["$type"] = transformAnimations.DEFINITION_CLASS,
-        name = transformAnimations.cname(name),
+        name = redValue.cName(name),
         autoStart = 0,
         autoStartDelay = 0,
         looping = 0,
@@ -597,7 +554,7 @@ end
 ---@return string
 function transformAnimations.definitionName(definition)
     if type(definition) ~= "table" then return "" end
-    return transformAnimations.readCName(definition.name)
+    return redValue.readCName(definition.name)
 end
 
 ---@param animations table? The animator's `animations` array
@@ -657,7 +614,7 @@ function transformAnimations.describeTrack(item)
     if class == "gameTransformAnimation_RotateOnAxis" then
         local degrees = transformAnimations.rotationsToDegrees(implData.numberOfFullRotations)
         local axis = tostring(implData.axis or "?")
-        local reversed = transformAnimations.readBool(implData.reverseDirection) and " reversed" or ""
+        local reversed = redValue.readBool(implData.reverseDirection) and " reversed" or ""
         return string.format("%s %.0f deg%s", axis, degrees, reversed)
     end
 
@@ -676,15 +633,15 @@ function transformAnimations.describeTrack(item)
     end
 
     if class == "gameTransformAnimation_SpawnEffect" then
-        return transformAnimations.readCName(implData.effectName)
+        return redValue.readCName(implData.effectName)
     end
 
     if class == "gameTransformAnimation_KillEffect" or class == "gameTransformAnimation_BreakEffectLoop" then
-        return transformAnimations.readCName(implData.effectTag)
+        return redValue.readCName(implData.effectTag)
     end
 
     if class == "gameTransformAnimation_PlaySound" then
-        return transformAnimations.readCName(implData.soundName)
+        return redValue.readCName(implData.soundName)
     end
 
     return ""
@@ -812,7 +769,7 @@ function transformAnimations.getAnimatorBoundComponents(spawnable, componentID)
     local animator = components[componentID]
     if type(animator) ~= "table" then return {} end
 
-    local animatorName = transformAnimations.readCName(animator.name)
+    local animatorName = redValue.readCName(animator.name)
     if animatorName == "" then return {} end
 
     local bound = {}
@@ -821,8 +778,8 @@ function transformAnimations.getAnimatorBoundComponents(spawnable, componentID)
         if id ~= componentID and type(component) == "table" then
             local parent = component.parentTransform
             local binding = type(parent) == "table" and type(parent.Data) == "table" and parent.Data or nil
-            if binding and transformAnimations.readCName(binding.bindName) == animatorName then
-                table.insert(bound, transformAnimations.readCName(component.name))
+            if binding and redValue.readCName(binding.bindName) == animatorName then
+                table.insert(bound, redValue.readCName(component.name))
             end
         end
     end

@@ -1,6 +1,7 @@
 local utils = require("modules/utils/core/utils")
 local gameUtils = require("modules/utils/game/gameUtils")
 local config = require("modules/utils/core/config")
+local redValue = require("modules/utils/data/redValue")
 
 ---Shared sound system / speaker data.
 ---Read by the device spawnable, the quick setup popup and the editor viewport overlay, so the
@@ -297,19 +298,6 @@ local locKeyCache = {}
 ---open, so both are memoized. `false` records a confirmed miss.
 local interactionCaptionCache = {}
 local interactionExistsCache = {}
-
----@param value any
----@param defaultValue number?
----@return number
-local function boolToInt(value, defaultValue)
-    if value == nil then
-        value = defaultValue
-    end
-
-    return (value == true or value == 1) and 1 or 0
-end
-
-soundSystem.boolToInt = boolToInt
 
 ---Reads a TweakDB flat and normalizes a LocKey wrapper into the `LocKey#<id>` text form used
 ---everywhere else in the mod. LocKeys stringify as `LocKey(1234ull)`.
@@ -875,7 +863,7 @@ function soundSystem.createEntry(options)
 
     return {
         ["$type"] = "SoundSystemSettings",
-        canBeUsedAsQuickHack = boolToInt(options.canBeUsedAsQuickHack, 0),
+        canBeUsedAsQuickHack = redValue.boolToInt(options.canBeUsedAsQuickHack, 0),
         interactionName = {
             ["$type"] = "TweakDBID",
             ["$storage"] = "string",
@@ -895,7 +883,7 @@ end
 function soundSystem.normalizeEntry(entry)
     local normalized = utils.deepcopy(type(entry) == "table" and entry or {})
     normalized["$type"] = "SoundSystemSettings"
-    normalized.canBeUsedAsQuickHack = boolToInt(normalized.canBeUsedAsQuickHack, 0)
+    normalized.canBeUsedAsQuickHack = redValue.boolToInt(normalized.canBeUsedAsQuickHack, 0)
 
     if type(normalized.interactionName) ~= "table" then
         normalized.interactionName = {
@@ -1024,7 +1012,7 @@ function soundSystem.normalizeSpeakerSetup(setup)
     normalized.distractionMusic = distractionMusic
 
     normalized.range = math.max(0, tonumber(normalized.range) or 10)
-    normalized.useOnlyGlitchSFX = boolToInt(normalized.useOnlyGlitchSFX, 0)
+    normalized.useOnlyGlitchSFX = redValue.boolToInt(normalized.useOnlyGlitchSFX, 0)
 
     if type(normalized.glitchSFX) ~= "table" then
         normalized.glitchSFX = {
@@ -1077,7 +1065,7 @@ function soundSystem.normalizeComputerSetup(setup)
     normalized.startingMenu = startingMenu
 
     for _, key in ipairs({ "mailsMenu", "filesMenu", "systemMenu", "internetMenu", "newsFeedMenu", "hideTopNavigationBar" }) do
-        normalized[key] = boolToInt(normalized[key], 0)
+        normalized[key] = redValue.boolToInt(normalized[key], 0)
     end
 
     return normalized

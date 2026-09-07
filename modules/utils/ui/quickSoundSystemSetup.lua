@@ -3,7 +3,9 @@ local utils = require("modules/utils/core/utils")
 local registry = require("modules/utils/game/nodeRefRegistry")
 local history = require("modules/utils/project/history")
 local soundSystemData = require("modules/utils/data/soundSystem")
+local redValue = require("modules/utils/data/redValue")
 local soundSelector = require("modules/utils/ui/soundSelector")
+local graph = require("modules/utils/ui/quickSetupGraph")
 
 ---Quick setup for `SoundSystemControllerPS` devices: the entry list players pick from, and the
 ---speaker chain the sound comes out of.
@@ -16,37 +18,9 @@ local quickSoundSystemSetupUI = {
 }
 
 ---@param device table
----@param options table?
-function quickSoundSystemSetupUI.install(device, options)
+function quickSoundSystemSetupUI.install(device)
     if not device then
         return
-    end
-
-    options = options or {}
-    local sanitizeConnectionValue = options.sanitizeConnectionValue or utils.sanitizeText
-    local boolToInt = options.boolToInt or soundSystemData.boolToInt
-
-    ---Width left for a field once the buttons that follow it on the same row are accounted for.
-    ---@param buttonLabels string[]?
-    ---@param minWidth number?
-    ---@return number
-    local function getRowFieldWidth(buttonLabels, minWidth)
-        local labels = buttonLabels or {}
-        local styleData = ImGui.GetStyle()
-        local framePaddingX = styleData.FramePadding.x * 2
-        local itemSpacingX = styleData.ItemSpacing.x
-        local reservedWidth = 0
-
-        for _, label in ipairs(labels) do
-            reservedWidth = reservedWidth + ImGui.CalcTextSize(tostring(label or "")) + framePaddingX
-        end
-
-        if #labels > 0 then
-            reservedWidth = reservedWidth + itemSpacingX * #labels
-        end
-
-        local fieldWidth = (ImGui.GetWindowContentRegionWidth() - ImGui.GetCursorPosX() - reservedWidth) / style.viewSize
-        return math.max(tonumber(minWidth) or 140, fieldWidth)
     end
 
     ---Right-aligns the reorder / delete button cluster of a list row header.
@@ -102,7 +76,7 @@ function quickSoundSystemSetupUI.install(device, options)
             end
         end
 
-        local current = sanitizeConnectionValue(currentValue)
+        local current = utils.sanitizeText(currentValue)
         if current ~= "" and not seen[current] then
             table.insert(optionList, 1, current)
         end
@@ -201,7 +175,7 @@ function quickSoundSystemSetupUI.install(device, options)
 
         self.soundSystemInteractionSearch = self.soundSystemInteractionSearch or {}
         local searchKey = tostring(index)
-        local currentInteraction = sanitizeConnectionValue(entry.interactionName["$value"])
+        local currentInteraction = utils.sanitizeText(entry.interactionName["$value"])
         local editedInteraction, searchValue, interactionChanged = style.trackedSearchDropdown(
             "##soundSystemEntryCaption",
             "Search interaction record...",
@@ -210,7 +184,7 @@ function quickSoundSystemSetupUI.install(device, options)
             getInteractionOptions(currentInteraction),
             {
                 element = self.object,
-                width = getRowFieldWidth({}, 220),
+                width = style.getRowFieldWidth({}, 220),
                 matchContentWidth = true,
                 allowCustom = true,
                 -- The caption the player will read, not a description of the record: the author is
@@ -224,9 +198,9 @@ function quickSoundSystemSetupUI.install(device, options)
             }
         )
         self.soundSystemInteractionSearch[searchKey] = searchValue
-        if interactionChanged and sanitizeConnectionValue(editedInteraction) ~= currentInteraction then
+        if interactionChanged and utils.sanitizeText(editedInteraction) ~= currentInteraction then
             commit(function (draft)
-                draft.interactionName["$value"] = sanitizeConnectionValue(editedInteraction)
+                draft.interactionName["$value"] = utils.sanitizeText(editedInteraction)
             end)
             ImGui.PopID()
             return false
@@ -294,7 +268,7 @@ function quickSoundSystemSetupUI.install(device, options)
                 stationOptions,
                 {
                     element = self.object,
-                    width = getRowFieldWidth({}, 220),
+                    width = style.getRowFieldWidth({}, 220),
                     matchContentWidth = true,
                     allowCustom = true,
                     -- Rows read as station names, not as enum members: the name is what the author
@@ -347,7 +321,7 @@ function quickSoundSystemSetupUI.install(device, options)
             local editedEvent, eventFinished = soundSelector.draw("##soundSystemEntrySoundEvent", eventName, {
                 stateKey = string.format("soundSystemEntry/%s/%s", tostring(self.object and self.object.id), tostring(index)),
                 element = self.object,
-                width = getRowFieldWidth({ IconGlyphs.Play }, 220),
+                width = style.getRowFieldWidth({ IconGlyphs.Play }, 220),
                 -- The catalogue runs to a thousand-odd events, so the list gets more than the
                 -- default height to scroll in. The rows are clipped either way.
                 listHeight = 260,
@@ -405,7 +379,7 @@ function quickSoundSystemSetupUI.install(device, options)
         style.drawIconLabelRow(IconGlyphs.Chip, "Quickhack")
         ImGui.SameLine()
         ImGui.SetCursorPosX(labelX)
-        local isQuickHack = boolToInt(entry.canBeUsedAsQuickHack, 0) == 1
+        local isQuickHack = redValue.boolToInt(entry.canBeUsedAsQuickHack, 0) == 1
         local newQuickHack, quickHackChanged = style.trackedCheckbox(self.object, "##soundSystemEntryQuickHack", isQuickHack)
         style.tooltip("Expose this entry as a quickhack instead of a regular interaction.\nVanilla pairs this with Interactions.HackVolume and the DEAFENED effect.")
         if quickHackChanged then
@@ -440,100 +414,6 @@ function quickSoundSystemSetupUI.install(device, options)
         return speakerEntry.nodeRef ~= "" and speakerEntry.nodeRef or "Unresolved"
     end
 
-    ---@param value string
-    ---@return string
-    local function getVisibleLabel(value)
-        local text = tostring(value or "")
-        local idStart = text:find("##", 1, true)
-        if idStart then
-            text = text:sub(1, idStart - 1)
-        end
-
-        return (text:gsub("%s+$", ""))
-    end
-
-    ---@param label string
-    ---@param maxWidth number
-    ---@return string
-    local function fitSingleLineLabel(label, maxWidth)
-        local text = tostring(label or "")
-        if text == "" or maxWidth <= 0 then
-            return ""
-        end
-
-        if ImGui.CalcTextSize(text) <= maxWidth then
-            return text
-        end
-
-        while #text > 1 and ImGui.CalcTextSize(text .. "...") > maxWidth do
-            text = text:sub(1, #text - 1)
-        end
-
-        return text .. "..."
-    end
-
-    ---Title row used by the selected graph item panel.
-    ---@param icon string
-    ---@param title string
-    ---@param subtitle string?
-    ---@param action table? `{ label: string, tooltip: string?, danger: boolean?, onClick: function }`
-    ---@return boolean actionClicked
-    local function drawSoundSystemDetailTitle(icon, title, subtitle, action)
-        local styleData = ImGui.GetStyle()
-        local actionLabel = action and tostring(action.label or "") or ""
-        local visibleActionLabel = action and getVisibleLabel(actionLabel) or ""
-        local actionWidth = 0
-
-        if action and actionLabel ~= "" then
-            actionWidth = ImGui.CalcTextSize(visibleActionLabel)
-                + styleData.FramePadding.x * 2
-        end
-
-        local contentWidth = ImGui.GetWindowContentRegionWidth()
-        local subtitleText = tostring(subtitle or "")
-        local subtitleWidth = subtitleText ~= "" and ImGui.CalcTextSize(subtitleText) or 0
-        local iconText = tostring(icon or "")
-        local iconPrefix = iconText ~= "" and (iconText .. "  ") or ""
-        local iconWidth = iconPrefix ~= "" and ImGui.CalcTextSize(iconPrefix) or 0
-        local titleReserve = actionWidth
-            + (actionWidth > 0 and styleData.ItemSpacing.x * 2 or 0)
-            + (subtitleWidth > 0 and subtitleWidth + styleData.ItemSpacing.x or 0)
-            + iconWidth
-        local titleText = fitSingleLineLabel(tostring(title or ""), contentWidth - titleReserve)
-
-        ImGui.AlignTextToFramePadding()
-        style.styledText(iconPrefix .. titleText, style.highlightColor)
-
-        if subtitleText ~= "" then
-            ImGui.SameLine()
-            style.mutedText(subtitleText)
-        end
-
-        local clicked = false
-        if action and actionLabel ~= "" and action.onClick then
-            ImGui.SameLine()
-            ImGui.SetCursorPosX(math.max(0, contentWidth - actionWidth))
-
-            if action.danger then
-                clicked = style.dangerButton(actionLabel)
-            else
-                clicked = ImGui.Button(actionLabel)
-            end
-
-            if action.tooltip then
-                style.tooltip(action.tooltip)
-            end
-            if clicked then
-                action.onClick()
-            end
-        end
-
-        ImGui.Separator()
-        ImGui.Spacing()
-
-        return clicked
-    end
-
     ---The speaker picked in the chain graph. Exactly one is ever on screen, so there is no
     ---collapsing header here; optional title actions come from the owning selection panel.
     ---@param speakerEntry table
@@ -557,7 +437,7 @@ function quickSoundSystemSetupUI.install(device, options)
         local stateKey = getSpeakerKey(speakerEntry, index)
         local definition = speakerEntry.definition
 
-        if drawSoundSystemDetailTitle(
+        if style.drawDetailTitle(
             definition and definition.icon or IconGlyphs.Speaker,
             getSpeakerName(speakerEntry),
             tostring(speakerEntry.label),
@@ -576,7 +456,7 @@ function quickSoundSystemSetupUI.install(device, options)
             "##soundSystemSpeakerNodeRef",
             speakerEntry.nodeRef,
             "NodeRef...",
-            getRowFieldWidth({ IconGlyphs.ReloadAlert })
+            style.getRowFieldWidth({ IconGlyphs.ReloadAlert })
         )
         if nodeRefFinished then
             self:updateSpeakerNodeRef(speakerEntry, editedNodeRef)
@@ -725,7 +605,7 @@ function quickSoundSystemSetupUI.install(device, options)
         local editedGlitchSFX, glitchSFXFinished = soundSelector.draw("##soundSystemSpeakerGlitchSFX", glitchSFX, {
             stateKey = string.format("soundSystemGlitchSFX/%s/%s", tostring(self.object and self.object.id), tostring(draftKey)),
             element = speakerEntry.speakerElement or self.object,
-            width = getRowFieldWidth({ IconGlyphs.Play }, 220),
+            width = style.getRowFieldWidth({ IconGlyphs.Play }, 220),
             listHeight = 260,
             pool = {
                 names = soundSystemData.getStaticAudioEmitterEvents(),
@@ -751,7 +631,7 @@ function quickSoundSystemSetupUI.install(device, options)
         style.drawIconLabelRow(IconGlyphs.MusicNoteOff, "Use Only Glitch SFX")
         ImGui.SameLine()
         ImGui.SetCursorPosX(labelX)
-        local useOnlyGlitchSFX = boolToInt(setup.useOnlyGlitchSFX, 0) == 1
+        local useOnlyGlitchSFX = redValue.boolToInt(setup.useOnlyGlitchSFX, 0) == 1
         local newUseOnlyGlitchSFX, useOnlyGlitchSFXChanged = style.trackedCheckbox(
             speakerEntry.speakerElement or self.object,
             "##soundSystemSpeakerUseOnlyGlitchSFX",
@@ -806,7 +686,7 @@ function quickSoundSystemSetupUI.install(device, options)
     ---@return string
     local function getMasterKey(masterEntry, index)
         local nodeRef = masterEntry.masterSpawnable
-            and sanitizeConnectionValue(masterEntry.masterSpawnable.nodeRef)
+            and utils.sanitizeText(masterEntry.masterSpawnable.nodeRef)
             or ""
 
         return nodeRef ~= "" and ("nodeRef:" .. nodeRef) or ("index:" .. tostring(index))
@@ -839,7 +719,7 @@ function quickSoundSystemSetupUI.install(device, options)
 
         local definition = masterEntry.definition
 
-        if drawSoundSystemDetailTitle(
+        if style.drawDetailTitle(
             definition and definition.icon or IconGlyphs.Monitor,
             getMasterName(masterEntry),
             tostring(masterEntry.label),
@@ -859,14 +739,14 @@ function quickSoundSystemSetupUI.install(device, options)
         style.mutedText("Node Ref")
         ImGui.SameLine()
         ImGui.SetCursorPosX(labelX)
-        local currentMasterNodeRef = sanitizeConnectionValue(masterSpawnable.nodeRef)
+        local currentMasterNodeRef = utils.sanitizeText(masterSpawnable.nodeRef)
         local nodeRefOwner = masterEntry.masterElement or self.object
         local editedNodeRef, _, nodeRefFinished = style.trackedTextField(
             nodeRefOwner,
             "##soundSystemMasterNodeRef",
             currentMasterNodeRef,
             "NodeRef...",
-            getRowFieldWidth({ IconGlyphs.ReloadAlert })
+            style.getRowFieldWidth({ IconGlyphs.ReloadAlert })
         )
         if nodeRefFinished then
             self:updateSoundSystemMasterNodeRef(masterEntry, editedNodeRef)
@@ -1014,7 +894,7 @@ function quickSoundSystemSetupUI.install(device, options)
         else
             local addLabel, addHiddenText = style.resolveActionLabel(IconGlyphs.Plus, "Add Entry", "soundSystemAddEntry", nil, true)
             local systemName = self.object and tostring(self.object.name or "") or ""
-            drawSoundSystemDetailTitle(
+            style.drawDetailTitle(
                 soundSystemData.SYSTEM_ICON,
                 systemName ~= "" and systemName or "Sound System",
                 string.format("%d %s", #entries, #entries == 1 and "entry" or "entries"),
@@ -1098,197 +978,18 @@ function quickSoundSystemSetupUI.install(device, options)
     ---Square, so it reads as an action rather than as another node in the row.
     local GRAPH_ADD_SIZE = 26
 
-    ---Shortens a label to fit a node box, so a long element name cannot blow the layout out.
-    ---@param label string
-    ---@param maxWidth number
-    ---@param fontRatio number
-    ---@return string
-    local function fitLabel(label, maxWidth, fontRatio)
-        local text = tostring(label or "")
-        if text == "" then
-            return ""
-        end
-
-        local function widthOf(value)
-            return (ImGui.CalcTextSize(value)) * fontRatio
-        end
-
-        if widthOf(text) <= maxWidth then
-            return text
-        end
-
-        while #text > 1 and widthOf(text .. "...") > maxWidth do
-            text = text:sub(1, #text - 1)
-        end
-
-        return text .. "..."
-    end
-
-    ---Title text for the graph node. Icons are drawn separately so they can sit centered across the
-    ---whole item rather than riding the title line.
-    ---@param item table
-    ---@return string
-    local function getGraphNodeTitle(item)
-        return tostring(item.title or "")
-    end
-
-    ---One box of the chain graph. Draws itself and reports a left click.
-    ---@param drawList table
-    ---@param item table `{ id, x, y, width, height, color, icon, title, subtitle, tooltip, selected }`
-    ---@return boolean clicked
-    local function drawGraphNode(drawList, item)
-        local x, y, width, height = item.x, item.y, item.width, item.height
-        local color = item.color
-
-        ImGui.SetCursorScreenPos(x, y)
-        local clicked = ImGui.InvisibleButton(item.id, width, height)
-        local hovered = ImGui.IsItemHovered()
-
-        if item.tooltip then
-            style.tooltip(item.tooltip)
-        end
-
-        -- The context menu has to be bound to the item while it is still the last one submitted,
-        -- which is why the caller hands it in rather than opening it afterwards.
-        if item.drawContextMenu then
-            item.drawContextMenu()
-        end
-
-        local alpha = item.selected and 0x77000000 or (hovered and 0x55000000 or 0x26000000)
-        local fillColor = alpha + (color % 0x1000000)
-        local rounding = 3 * style.viewSize
-        local borderWidth = ((item.selected or hovered) and 2 or 1) * style.viewSize
-
-        ImGui.ImDrawListAddRectFilled(drawList, x, y, x + width, y + height, fillColor, rounding)
-        ImGui.ImDrawListAddRect(drawList, x, y, x + width, y + height, color, rounding, 0, borderWidth)
-
-        local fontSize = ImGui.GetFontSize()
-        local styleData = ImGui.GetStyle()
-        local innerPaddingX = GRAPH_NODE_PADDING_X * style.viewSize
-        local icon = tostring(item.icon or "")
-        local hasIcon = icon ~= ""
-        local iconWidth, iconHeight = 0, fontSize
-
-        if hasIcon then
-            iconWidth, iconHeight = ImGui.CalcTextSize(icon)
-        end
-
-        local iconSpacing = hasIcon and styleData.ItemSpacing.x or 0
-        local textLeft = x + innerPaddingX + iconWidth + iconSpacing
-        local textWidth = math.max(1, width - 2 * innerPaddingX - iconWidth - iconSpacing)
-        local titleText = fitLabel(getGraphNodeTitle(item), textWidth, 1)
-        local titleWidth = ImGui.CalcTextSize(titleText)
-        local subtitle = item.subtitle
-
-        if hasIcon then
-            ImGui.ImDrawListAddText(
-                drawList,
-                fontSize,
-                x + innerPaddingX,
-                y + (height - iconHeight) / 2,
-                style.highlightColor,
-                icon
-            )
-        end
-
-        if subtitle and subtitle ~= "" then
-            local subtitleText = fitLabel(subtitle, textWidth, GRAPH_SUBTITLE_RATIO)
-            local subtitleWidth = ImGui.CalcTextSize(subtitleText) * GRAPH_SUBTITLE_RATIO
-            local blockHeight = fontSize + fontSize * GRAPH_SUBTITLE_RATIO
-            local top = y + (height - blockHeight) / 2
-            local titleX = hasIcon and textLeft or (x + (width - titleWidth) / 2)
-            local subtitleX = hasIcon and textLeft or (x + (width - subtitleWidth) / 2)
-
-            ImGui.ImDrawListAddText(drawList, fontSize, titleX, top, style.highlightColor, titleText)
-            ImGui.ImDrawListAddText(
-                drawList,
-                fontSize * GRAPH_SUBTITLE_RATIO,
-                subtitleX,
-                top + fontSize,
-                style.mutedColor,
-                subtitleText
-            )
-        else
-            ImGui.ImDrawListAddText(
-                drawList,
-                fontSize,
-                hasIcon and textLeft or (x + (width - titleWidth) / 2),
-                y + (height - fontSize) / 2,
-                style.highlightColor,
-                titleText
-            )
-        end
-
-        return clicked and item.suppressClick ~= true, hovered
-    end
-
-    ---Square dashed-looking box that ends the master and speaker rows.
-    ---@param drawList table
-    ---@param id string
-    ---@param x number
-    ---@param y number
-    ---@param size number
-    ---@param color integer
-    ---@param tooltip string
-    ---@param disabled boolean
-    ---@param suppressClick boolean?
-    ---@return boolean clicked
-    local function drawGraphAddButton(drawList, id, x, y, size, color, tooltip, disabled, suppressClick)
-        ImGui.SetCursorScreenPos(x, y)
-        local clicked = ImGui.InvisibleButton(id, size, size) and not disabled and suppressClick ~= true
-        local itemHovered = ImGui.IsItemHovered()
-        local hovered = itemHovered and not disabled
-
-        style.tooltip(tooltip)
-
-        local accent = disabled and style.greyedColor or color
-        local rounding = 3 * style.viewSize
-
-        if hovered then
-            ImGui.ImDrawListAddRectFilled(drawList, x, y, x + size, y + size, 0x40000000 + (accent % 0x1000000), rounding)
-        end
-        ImGui.ImDrawListAddRect(drawList, x, y, x + size, y + size, accent, rounding, 0, 1 * style.viewSize)
-
-        local glyph = IconGlyphs.Plus
-        local glyphWidth, glyphHeight = ImGui.CalcTextSize(glyph)
-        ImGui.ImDrawListAddText(
-            drawList,
-            ImGui.GetFontSize(),
-            x + (size - glyphWidth) / 2,
-            y + (size - glyphHeight) / 2,
-            disabled and style.greyedColor or style.highlightColor,
-            glyph
-        )
-
-        return clicked, itemHovered
-    end
-
-    ---Width a node needs for its two lines, clamped so one long name cannot dominate the row.
-    ---@param item table
-    ---@return number
-    local function getGraphNodeWidth(item)
-        local styleData = ImGui.GetStyle()
-        local icon = tostring(item.icon or "")
-        local iconWidth = icon ~= "" and (ImGui.CalcTextSize(icon) + styleData.ItemSpacing.x) or 0
-        local titleWidth = ImGui.CalcTextSize(getGraphNodeTitle(item))
-        local subtitleWidth = item.subtitle and (ImGui.CalcTextSize(tostring(item.subtitle)) * GRAPH_SUBTITLE_RATIO) or 0
-        local contentWidth = iconWidth + math.max(titleWidth, subtitleWidth) + 2 * GRAPH_NODE_PADDING_X * style.viewSize
-
-        return math.max(
-            GRAPH_MIN_NODE_WIDTH * style.viewSize,
-            math.min(GRAPH_MAX_NODE_WIDTH * style.viewSize, contentWidth)
-        )
-    end
-
-    ---Elbow connector from the bottom edge of one node to the top edge of another.
-    local function drawGraphLink(drawList, fromX, fromY, toX, toY, color)
-        local midY = (fromY + toY) / 2
-        local thickness = 1.5 * style.viewSize
-
-        ImGui.ImDrawListAddLine(drawList, fromX, fromY, fromX, midY, color, thickness)
-        ImGui.ImDrawListAddLine(drawList, fromX, midY, toX, midY, color, thickness)
-        ImGui.ImDrawListAddLine(drawList, toX, midY, toX, toY, color, thickness)
-    end
+    local graphNodeOptions = {
+        paddingX = GRAPH_NODE_PADDING_X,
+        minWidth = GRAPH_MIN_NODE_WIDTH,
+        maxWidth = GRAPH_MAX_NODE_WIDTH,
+        subtitleRatio = GRAPH_SUBTITLE_RATIO
+    }
+    local graphNodeDrawOptions = {
+        paddingX = GRAPH_NODE_PADDING_X,
+        subtitleRatio = GRAPH_SUBTITLE_RATIO,
+        centerTextWhenNoIcon = true,
+        showOrphanBadge = false
+    }
 
     ---Boxes-and-lines picture of the chain, and the only way to move around the popup: masters on
     ---top, this system in the middle, speakers at the bottom. Left click selects, which is what the
@@ -1313,7 +1014,7 @@ function quickSoundSystemSetupUI.install(device, options)
         local addSpeakerPopupId = "##soundSystemGraphAddSpeaker"
         local addMasterPopupId = "##soundSystemGraphAddMaster"
         local graphContextPopupId = "##soundSystemGraphContext"
-        local canAddMaster = sanitizeConnectionValue(self.nodeRef) ~= ""
+        local canAddMaster = utils.sanitizeText(self.nodeRef) ~= ""
 
         local function addEntryFromGraph()
             self:addSoundSystemEntry()
@@ -1376,7 +1077,7 @@ function quickSoundSystemSetupUI.install(device, options)
             local rowWidth = 0
 
             for index, item in ipairs(items) do
-                item.width = getGraphNodeWidth(item)
+                item.width = graph.measureNode(item, graphNodeOptions)
                 item.height = nodeHeight
                 rowWidth = rowWidth + item.width
                 if index > 1 then
@@ -1567,7 +1268,7 @@ function quickSoundSystemSetupUI.install(device, options)
                     end
                 end
 
-                local clicked, hovered = drawGraphNode(drawList, item)
+                local clicked, hovered = graph.drawNode(drawList, item, graphNodeDrawOptions)
                 if hovered then
                     graphItemHovered = true
                 end
@@ -1594,16 +1295,15 @@ function quickSoundSystemSetupUI.install(device, options)
             if addOptions then
                 local addY = rowY + (nodeHeight - addSize) / 2
                 local addX = originX + rowLeft + rowWidth + (rowWidth > 0 and nodeGap or 0)
-                local clicked, hovered = drawGraphAddButton(
-                    drawList,
-                    addOptions.id,
-                    addX,
-                    addY,
-                    addSize,
-                    addOptions.color,
-                    addOptions.tooltip,
-                    addOptions.disabled == true
-                )
+                local clicked, hovered = graph.drawAddButton(drawList, {
+                    id = addOptions.id,
+                    x = addX,
+                    y = addY,
+                    size = addSize,
+                    color = addOptions.color,
+                    tooltip = addOptions.tooltip,
+                    disabled = addOptions.disabled == true
+                })
                 if hovered then
                     graphItemHovered = true
                 end
@@ -1645,11 +1345,11 @@ function quickSoundSystemSetupUI.install(device, options)
         local systemNode = placedSystem[1]
         if systemNode then
             for _, master in ipairs(placedMasters) do
-                drawGraphLink(drawList, master.centerX, master.bottom, systemNode.centerX, systemNode.top, masterColor)
+                graph.drawElbowLink(drawList, master.centerX, master.bottom, systemNode.centerX, systemNode.top, masterColor)
             end
 
             for _, speaker in ipairs(placedSpeakers) do
-                drawGraphLink(drawList, systemNode.centerX, systemNode.bottom, speaker.centerX, speaker.top, speakerColor)
+                graph.drawElbowLink(drawList, systemNode.centerX, systemNode.bottom, speaker.centerX, speaker.top, speakerColor)
             end
         end
 
@@ -1804,8 +1504,8 @@ function quickSoundSystemSetupUI.install(device, options)
         }) + 4 * ImGui.GetStyle().ItemSpacing.x
 
         local function applyNodeRef(newNodeRef)
-            local normalizedNodeRef = sanitizeConnectionValue(newNodeRef)
-            local currentNodeRef = sanitizeConnectionValue(self.nodeRef)
+            local normalizedNodeRef = utils.sanitizeText(newNodeRef)
+            local currentNodeRef = utils.sanitizeText(self.nodeRef)
             if normalizedNodeRef == currentNodeRef then
                 return
             end
@@ -1835,10 +1535,7 @@ function quickSoundSystemSetupUI.install(device, options)
                 end
             end
 
-            registry.invalidate()
-            if self.object.sUI and self.object.sUI.cachePaths then
-                self.object.sUI.cachePaths()
-            end
+            self:refreshNodeRefCaches()
         end
 
         local canGenerateNodeRef = self.object ~= nil and self.object.parent ~= nil
@@ -1848,15 +1545,15 @@ function quickSoundSystemSetupUI.install(device, options)
         -- A sound system without a NodeRef cannot be connected to anything, and the .psrep entry is
         -- keyed on it, so it is generated up front rather than left as a step to remember.
         local recordedElementChange = false
-        if popupJustOpened and canGenerateNodeRef and sanitizeConnectionValue(self.nodeRef) == "" then
-            local generated = sanitizeConnectionValue(registry.generate(self.object))
+        if popupJustOpened and canGenerateNodeRef and utils.sanitizeText(self.nodeRef) == "" then
+            local generated = utils.sanitizeText(registry.generate(self.object))
             if generated ~= "" then
                 applyNodeRef(generated)
                 recordedElementChange = true
             end
         end
 
-        if popupJustOpened and not self.persistent and sanitizeConnectionValue(self.nodeRef) ~= "" then
+        if popupJustOpened and not self.persistent and utils.sanitizeText(self.nodeRef) ~= "" then
             -- `applyNodeRef` snapshots the element before it mutates anything, so that one action
             -- already covers this change too; a second would only cost an extra undo step.
             if not recordedElementChange then
@@ -1871,9 +1568,9 @@ function quickSoundSystemSetupUI.install(device, options)
         local editedNodeRef, _, nodeRefFinished = style.trackedTextField(
             self.object,
             "##soundSystemNodeRef",
-            sanitizeConnectionValue(self.nodeRef),
+            utils.sanitizeText(self.nodeRef),
             "NodeRef...",
-            getRowFieldWidth({ IconGlyphs.ReloadAlert })
+            style.getRowFieldWidth({ IconGlyphs.ReloadAlert })
         )
         if nodeRefFinished then
             applyNodeRef(editedNodeRef)
@@ -1897,7 +1594,7 @@ function quickSoundSystemSetupUI.install(device, options)
                 IconGlyphs.AlertOutline .. " Persistent is off, so the entries below are not written to the .psrep file and the system starts from its shipped state.",
                 style.warnColor
             )
-            local canPersist = sanitizeConnectionValue(self.nodeRef) ~= ""
+            local canPersist = utils.sanitizeText(self.nodeRef) ~= ""
             ImGui.BeginDisabled(not canPersist)
             if ImGui.Button("Enable Persistent##soundSystemEnablePersistent") and canPersist then
                 history.addAction(history.getElementChange(self.object))
@@ -1967,7 +1664,7 @@ function quickSoundSystemSetupUI.install(device, options)
                 "##soundSystemDefaultAction",
                 defaultAction,
                 entryLabels,
-                getRowFieldWidth({}, 260),
+                style.getRowFieldWidth({}, 260),
                 { tooltip = "Entry the system plays on load. Stored as a zero-based index." }
             )
             if defaultActionChanged then

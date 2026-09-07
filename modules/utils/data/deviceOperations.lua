@@ -1,5 +1,5 @@
 ---Shared `DeviceOperationsContainer` data: paths, the class catalogues the quick setup builds its UI
----from, and the small value helpers both the popup and the device spawnable need.
+---from.
 ---
 ---The container lives on the PS chunk of any device whose controller derives from
 ---`ScriptableDeviceComponentPS`, and ships null on effectively every device. It holds two arrays:
@@ -14,9 +14,9 @@
 local deviceOperations = {}
 
 local transformAnimations = require("modules/utils/data/transformAnimations")
-local deviceActions = require("modules/utils/data/deviceActions")
 local cache = require("modules/utils/game/cache")
 local builder = require("modules/utils/game/entityBuilder")
+local redValue = require("modules/utils/data/redValue")
 
 deviceOperations.BASE_PS_CLASS = "ScriptableDeviceComponentPS"
 deviceOperations.CONTAINER_CLASS = "DeviceOperationsContainer"
@@ -61,50 +61,6 @@ deviceOperations.ENUMS = {
     EPriority = { "VeryLow", "Low", "Medium", "High", "VeryHigh", "Absolute" },
     gameinteractionsEInteractionEventType = { "EIET_activate", "EIET_deactivate" }
 }
-
--- Value helpers ---------------------------------------------------------------------------------
-
----@param value string?
----@return table
-function deviceOperations.cname(value)
-    return { ["$type"] = "CName", ["$storage"] = "string", ["$value"] = tostring(value or "") }
-end
-
----@param data any
----@return string
-function deviceOperations.readCName(data)
-    if type(data) ~= "table" then return "" end
-    local value = tostring(data["$value"] or "")
-    -- Shipped CNames default to the literal "None"; showing that in an editable field invites
-    -- someone to leave it there, where it reads as a real event/component name that does not exist.
-    if value == "None" then return "" end
-    return value
-end
-
----@param value string?
----@return table
-function deviceOperations.nodeRef(value)
-    return { ["$type"] = "NodeRef", ["$storage"] = "string", ["$value"] = tostring(value or "") }
-end
-
----@param value string?
----@return table
-function deviceOperations.tweakDBID(value)
-    return { ["$type"] = "TweakDBID", ["$storage"] = "string", ["$value"] = tostring(value or "") }
-end
-
----@param data any
----@return string
-function deviceOperations.readRawValue(data)
-    if type(data) ~= "table" then return "" end
-    return tostring(data["$value"] or "")
-end
-
----@param value any
----@return boolean
-function deviceOperations.readBool(value)
-    return value == 1 or value == true
-end
 
 -- Field schemas ---------------------------------------------------------------------------------
 --
@@ -532,7 +488,7 @@ deviceOperations.TEMPLATES = {
                     { class = "FactsDeviceOperation", name = name,
                       set = { { path = { "facts" }, listItem = "SFactOperationData",
                                 values = {
-                                    { path = { "factName" }, value = deviceOperations.cname(prefix .. "_is_on") },
+                                    { path = { "factName" }, value = redValue.cName(prefix .. "_is_on") },
                                     { path = { "factValue" }, value = 1 },
                                     { path = { "operationType" }, value = "Set" }
                                 } } } }
@@ -848,7 +804,7 @@ function deviceOperations.getEffectNames(spawnable)
             for _, descriptor in ipairs(type(component.effectDescs) == "table" and component.effectDescs or {}) do
                 local descriptorData = type(descriptor) == "table" and descriptor.Data or descriptor
                 if type(descriptorData) == "table" then
-                    add(deviceOperations.readCName(descriptorData.effectName))
+                    add(redValue.readCName(descriptorData.effectName))
                 end
             end
         end
@@ -1114,7 +1070,7 @@ function deviceOperations.readCustomActionIDs(entries)
 
     for _, entry in ipairs(type(entries) == "table" and entries or {}) do
         local action = type(entry) == "table" and (entry.Data or entry) or nil
-        local name = type(action) == "table" and deviceOperations.readCName(action.actionID) or ""
+        local name = type(action) == "table" and redValue.readCName(action.actionID) or ""
 
         if name ~= "" and not seen[name] then
             seen[name] = true
@@ -1163,48 +1119,6 @@ function deviceOperations.invalidate()
     meshAppearanceCache = {}
     meshAppearancePending = {}
     meshRefCache = {}
-end
-
----The device actions one controller can raise, for the `Device action performed` trigger.
----
----Thin pass-through so the panel keeps reading every list from this module; the table itself and
----why it is shaped the way it is live in `deviceActions.lua`.
----@param deviceClassName string? Controller PS class
----@return { options: string[], category: table<string, string>, counts: table<string, number>, resolved: boolean }
-function deviceOperations.getDeviceActions(deviceClassName)
-    return deviceActions.forDevice(deviceClassName)
-end
-
----@param actionClass string
----@param category string?
----@return string
-function deviceOperations.describeDeviceAction(actionClass, category)
-    return deviceActions.describe(actionClass, category)
-end
-
----Interaction layer tags, for the `Interaction area enter / exit` trigger.
----@return string[]
-function deviceOperations.getInteractionAreaTags()
-    return deviceActions.getAreaTags()
-end
-
----@param tag string
----@return string
-function deviceOperations.describeInteractionAreaTag(tag)
-    return deviceActions.describeAreaTag(tag)
-end
-
----@param tag string
----@return string
-function deviceOperations.annotateInteractionAreaTag(tag)
-    return deviceActions.annotateAreaTag(tag)
-end
-
----Does `psClass` derive from `ScriptableDeviceComponentPS`, i.e. can it hold a container at all?
----@param psClass string
----@return boolean
-function deviceOperations.supportsDeviceOperations(psClass)
-    return deviceOperations.classDerivesFrom(psClass, deviceOperations.BASE_PS_CLASS)
 end
 
 return deviceOperations

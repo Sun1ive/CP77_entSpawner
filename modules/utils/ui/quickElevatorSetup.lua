@@ -2,56 +2,24 @@ local style = require("modules/ui/style")
 local utils = require("modules/utils/core/utils")
 local registry = require("modules/utils/game/nodeRefRegistry")
 local history = require("modules/utils/project/history")
+local redValue = require("modules/utils/data/redValue")
 
 local quickElevatorSetupUI = {
     POPUP_ID = "Quick Elevator Setup##Device"
 }
 
+local LIFT_CONTROLLER_CLASS = "LiftControllerPS"
+local ELEVATOR_FLOOR_CONTROLLER_CLASS = "ElevatorFloorTerminalControllerPS"
+local ELEVATOR_FLOOR_TERMINAL_COMPONENT_ID = "1394923055520256000"
 local LIFT_FLOOR_DOOR_LABELS = { "Door 1", "Door 2", "Door 3" }
 local FLOOR_LOCALIZATION_SUGGESTIONS = {
     2005, 2006, 2007, 2008, 49169, 49176, 49177, 49178, 49179, 49182, 49183, 49184, 49185, 49186, 49187, 49188, 49189, 49190, 49195, 49196, 49197, 49200, 49201, 49202, 49203, 49204, 49205, 49206, 49207, 49208, 49209, 49210, 49211, 49212, 49213, 49234, 49235, 49236, 49237, 49238, 49239, 49240, 49241, 49242, 49243, 49244, 49245, 49246, 49247, 49248, 49249, 49250, 49251, 49252, 49253, 49254, 49255, 49256, 49257, 49258, 49259, 49260, 49261, 49262, 49263, 49264, 49265, 49266, 49267, 49268, 49269, 49270, 49271, 49272, 49273, 49274, 49275, 49276, 49277, 49278, 49280, 49281, 49282, 49283, 49284, 49285, 49286, 49287, 49288, 49289, 49290, 49291, 49292, 49293, 49294, 49295, 49531, 49876, 49877, 49878, 50190, 50191, 50192, 50195, 50764, 50765, 51054, 51069, 51281, 53282, 53285, 80842, 80843, 84164, 84197, 85520, 86523, 86747, 86748, 86749, 86750, 86971, 86972, 86973, 86977, 88319, 88463, 88464, 88465, 91405, 91406, 94342, 80470, 80471, 80472, 80473, 80474, 80475, 81729, 81730, 84210, 84211, 84291, 84292, 85294, 85295, 85296, 85297, 85298, 85299, 90787, 90788
 }
 
 ---@param device table
----@param options table?
-function quickElevatorSetupUI.install(device, options)
+function quickElevatorSetupUI.install(device)
     if not device then
         return
-    end
-
-    options = options or {}
-    local liftControllerClass = tostring(options.liftControllerClass or "LiftControllerPS")
-    local elevatorFloorControllerClass = tostring(options.elevatorFloorControllerClass or "ElevatorFloorTerminalControllerPS")
-    local elevatorFloorTerminalComponentID = tostring(options.elevatorFloorTerminalComponentID or "1394923055520256000")
-    local sanitizeConnectionValue = options.sanitizeConnectionValue or utils.sanitizeText
-    local boolToInt = options.boolToInt or function(value, defaultValue)
-        if value == nil then
-            value = defaultValue
-        end
-        return (value == true or value == 1) and 1 or 0
-    end
-
-    ---@param buttonLabels string[]?
-    ---@param minWidth number?
-    ---@return number
-    local function getRowFieldWidth(buttonLabels, minWidth)
-        local labels = buttonLabels or {}
-        local styleData = ImGui.GetStyle()
-        local framePaddingX = styleData.FramePadding.x * 2
-        local itemSpacingX = styleData.ItemSpacing.x
-        local reservedWidth = 0
-
-        for _, label in ipairs(labels) do
-            reservedWidth = reservedWidth + ImGui.CalcTextSize(tostring(label or "")) + framePaddingX
-        end
-
-        if #labels > 0 then
-            -- One SameLine gap before each button.
-            reservedWidth = reservedWidth + itemSpacingX * #labels
-        end
-
-        local fieldWidth = (ImGui.GetWindowContentRegionWidth() - ImGui.GetCursorPosX() - reservedWidth) / style.viewSize
-        return math.max(tonumber(minWidth) or 140, fieldWidth)
     end
 
     ---@param entry table?
@@ -62,7 +30,7 @@ function quickElevatorSetupUI.install(device, options)
             return "folder:" .. tostring(entry.folderElement.id)
         end
 
-        local nodeRef = sanitizeConnectionValue(entry and (entry.nodeRef or entry.rawNodeRef or "") or "")
+        local nodeRef = utils.sanitizeText(entry and (entry.nodeRef or entry.rawNodeRef or "") or "")
         if nodeRef ~= "" then
             return "nodeRef:" .. nodeRef
         end
@@ -91,8 +59,8 @@ function quickElevatorSetupUI.install(device, options)
         if entry.terminalSpawnable then
             local headerComponentID = self:getPersistentComponentID(
                 entry.terminalSpawnable,
-                elevatorFloorControllerClass,
-                elevatorFloorTerminalComponentID
+                ELEVATOR_FLOOR_CONTROLLER_CLASS,
+                ELEVATOR_FLOOR_TERMINAL_COMPONENT_ID
             )
             if headerComponentID then
                 local headerFloorSetup = self:getComponentPathValue(
@@ -173,8 +141,8 @@ function quickElevatorSetupUI.install(device, options)
         end
 
         local function applyTerminalNodeRef(newNodeRef)
-            local normalizedNodeRef = sanitizeConnectionValue(newNodeRef)
-            local currentNodeRef = sanitizeConnectionValue(entry.connection and entry.connection.nodeRef or entry.nodeRef or entry.rawNodeRef or "")
+            local normalizedNodeRef = utils.sanitizeText(newNodeRef)
+            local currentNodeRef = utils.sanitizeText(entry.connection and entry.connection.nodeRef or entry.nodeRef or entry.rawNodeRef or "")
             if normalizedNodeRef == currentNodeRef then
                 return
             end
@@ -198,17 +166,14 @@ function quickElevatorSetupUI.install(device, options)
             end
             entry.nodeRef = normalizedNodeRef
 
-            registry.invalidate()
-            if self.object.sUI and self.object.sUI.cachePaths then
-                self.object.sUI.cachePaths()
-            end
+            self:refreshNodeRefCaches()
         end
 
         style.mutedText("Terminal Node Ref")
         ImGui.SameLine()
         ImGui.SetCursorPosX(floorsLabelX)
-        local terminalNodeRefFieldWidth = getRowFieldWidth({ IconGlyphs.ReloadAlert })
-        local displayedNodeRef = sanitizeConnectionValue(entry.connection and entry.connection.nodeRef or entry.nodeRef or entry.rawNodeRef or "")
+        local terminalNodeRefFieldWidth = style.getRowFieldWidth({ IconGlyphs.ReloadAlert })
+        local displayedNodeRef = utils.sanitizeText(entry.connection and entry.connection.nodeRef or entry.nodeRef or entry.rawNodeRef or "")
         local nodeRefOwner = entry.terminalElement or self.object
         local editedNodeRef, nodeRefChanged, nodeRefFinished = style.trackedTextField(
             nodeRefOwner,
@@ -249,8 +214,8 @@ function quickElevatorSetupUI.install(device, options)
 
         local componentID = self:getPersistentComponentID(
             entry.terminalSpawnable,
-            elevatorFloorControllerClass,
-            elevatorFloorTerminalComponentID
+            ELEVATOR_FLOOR_CONTROLLER_CLASS,
+            ELEVATOR_FLOOR_TERMINAL_COMPONENT_ID
         )
 
         if not componentID then
@@ -271,8 +236,8 @@ function quickElevatorSetupUI.install(device, options)
                 return
             end
 
-            local normalizedMarkerNodeRef = sanitizeConnectionValue(newNodeRef)
-            local currentMarkerNodeRef = sanitizeConnectionValue(entry.markerElement.spawnable.nodeRef)
+            local normalizedMarkerNodeRef = utils.sanitizeText(newNodeRef)
+            local currentMarkerNodeRef = utils.sanitizeText(entry.markerElement.spawnable.nodeRef)
             if normalizedMarkerNodeRef == currentMarkerNodeRef then
                 return
             end
@@ -291,10 +256,7 @@ function quickElevatorSetupUI.install(device, options)
             entry.markerElement.spawnable.nodeRef = normalizedMarkerNodeRef
             floorSetup = self:updateElevatorFloorSetup(entry, componentID, floorSetup)
 
-            registry.invalidate()
-            if self.object.sUI and self.object.sUI.cachePaths then
-                self.object.sUI.cachePaths()
-            end
+            self:refreshNodeRefCaches()
         end
 
         style.mutedText("Ground Marker Node Ref")
@@ -302,8 +264,8 @@ function quickElevatorSetupUI.install(device, options)
         ImGui.SetCursorPosX(floorsLabelX)
         local canEditMarkerNodeRef = entry.markerElement ~= nil and entry.markerElement.spawnable ~= nil
         local markerNodeRefOwner = entry.markerElement or entry.terminalElement or self.object
-        local markerNodeRefValue = sanitizeConnectionValue(canEditMarkerNodeRef and entry.markerElement.spawnable.nodeRef or "")
-        local markerNodeRefFieldWidth = getRowFieldWidth({ IconGlyphs.ReloadAlert })
+        local markerNodeRefValue = utils.sanitizeText(canEditMarkerNodeRef and entry.markerElement.spawnable.nodeRef or "")
+        local markerNodeRefFieldWidth = style.getRowFieldWidth({ IconGlyphs.ReloadAlert })
         ImGui.BeginDisabled(not canEditMarkerNodeRef)
         local editedMarkerNodeRef, markerNodeRefChanged, markerNodeRefFinished = style.trackedTextField(
             markerNodeRefOwner,
@@ -418,7 +380,7 @@ function quickElevatorSetupUI.install(device, options)
         style.drawIconLabelRow(IconGlyphs.EyeOffOutline, "Hidden")
         ImGui.SameLine()
         ImGui.SetCursorPosX(floorsLabelX)
-        local isHidden = boolToInt(floorSetup.isHidden, 0) == 1
+        local isHidden = redValue.boolToInt(floorSetup.isHidden, 0) == 1
         local newHidden, hiddenChanged = style.trackedCheckbox(entry.terminalElement, "##liftFloorHidden", isHidden)
 
         ImGui.EndGroup()
@@ -433,7 +395,7 @@ function quickElevatorSetupUI.install(device, options)
         style.drawIconLabelRow(IconGlyphs.Cancel, "Inactive")
         ImGui.SameLine()
         ImGui.SetCursorPosX(floorsLabelX)
-        local isInactive = boolToInt(floorSetup.isInactive, 0) == 1
+        local isInactive = redValue.boolToInt(floorSetup.isInactive, 0) == 1
         local newInactive, inactiveChanged = style.trackedCheckbox(entry.terminalElement, "##liftFloorInactive", isInactive)
         ImGui.EndGroup()
         style.tooltip("Disable this floor so it cannot be selected.")
@@ -451,7 +413,7 @@ function quickElevatorSetupUI.install(device, options)
                 ImGui.SameLine()
                 ImGui.SetCursorPosX(ImGui.GetCursorPosX() + ImGui.GetStyle().ItemSpacing.x * 2)
             end
-            local enabled = boolToInt(floorSetup.doorShouldOpenFrontLeftRight and floorSetup.doorShouldOpenFrontLeftRight[doorIndex], 1) == 1
+            local enabled = redValue.boolToInt(floorSetup.doorShouldOpenFrontLeftRight and floorSetup.doorShouldOpenFrontLeftRight[doorIndex], 1) == 1
             local newEnabled, doorChanged = style.trackedCheckbox(entry.terminalElement, doorLabel .. "##door" .. doorIndex, enabled)
             if doorChanged then
                 floorSetup.doorShouldOpenFrontLeftRight[doorIndex] = newEnabled and 1 or 0
@@ -507,7 +469,7 @@ function quickElevatorSetupUI.install(device, options)
                 ImGui.SetCursorPosX(floorsLabelX + 20 * style.viewSize)
 
                 local doorNodeRefOwner = doorEntry.doorElement or entry.terminalElement or self.object
-                local doorNodeRefValue = sanitizeConnectionValue(
+                local doorNodeRefValue = utils.sanitizeText(
                     doorEntry.connection and doorEntry.connection.nodeRef
                     or doorEntry.nodeRef
                     or doorEntry.rawNodeRef
@@ -518,7 +480,7 @@ function quickElevatorSetupUI.install(device, options)
                     "##liftFloorDoorNodeRef",
                     doorNodeRefValue,
                     "Door NodeRef...",
-                    getRowFieldWidth({ IconGlyphs.ReloadAlert, IconGlyphs.DeleteOutline })
+                    style.getRowFieldWidth({ IconGlyphs.ReloadAlert, IconGlyphs.DeleteOutline })
                 )
                 if doorNodeRefFinished then
                     self:updateLiftFloorDoorNodeRef(entry, doorEntry, editedDoorNodeRef)
@@ -608,8 +570,8 @@ function quickElevatorSetupUI.install(device, options)
         }) + 4 * ImGui.GetStyle().ItemSpacing.x
 
         local function applyElevatorNodeRef(newNodeRef)
-            local normalizedNodeRef = sanitizeConnectionValue(newNodeRef)
-            local currentNodeRef = sanitizeConnectionValue(self.nodeRef)
+            local normalizedNodeRef = utils.sanitizeText(newNodeRef)
+            local currentNodeRef = utils.sanitizeText(self.nodeRef)
             if normalizedNodeRef == currentNodeRef then
                 return
             end
@@ -617,17 +579,14 @@ function quickElevatorSetupUI.install(device, options)
             history.addAction(history.getElementChange(self.object))
             self.nodeRef = normalizedNodeRef
 
-            registry.invalidate()
-            if self.object.sUI and self.object.sUI.cachePaths then
-                self.object.sUI.cachePaths()
-            end
+            self:refreshNodeRefCaches()
         end
 
         local canGenerateElevatorNodeRef = self.object ~= nil and self.object.parent ~= nil
         local popupJustOpened = not self.quickLiftSetupPopupWasOpen
         self.quickLiftSetupPopupWasOpen = true
-        if popupJustOpened and canGenerateElevatorNodeRef and sanitizeConnectionValue(self.nodeRef) == "" then
-            local generatedNodeRef = sanitizeConnectionValue(registry.generate(self.object))
+        if popupJustOpened and canGenerateElevatorNodeRef and utils.sanitizeText(self.nodeRef) == "" then
+            local generatedNodeRef = utils.sanitizeText(registry.generate(self.object))
             if generatedNodeRef ~= "" then
                 applyElevatorNodeRef(generatedNodeRef)
             end
@@ -636,11 +595,11 @@ function quickElevatorSetupUI.install(device, options)
         style.mutedText("Elevator Node Ref")
         ImGui.SameLine()
         ImGui.SetCursorPosX(settingsLabelX)
-        local elevatorNodeRefFieldWidth = getRowFieldWidth({ IconGlyphs.ReloadAlert })
+        local elevatorNodeRefFieldWidth = style.getRowFieldWidth({ IconGlyphs.ReloadAlert })
         local editedElevatorNodeRef, elevatorNodeRefChanged, elevatorNodeRefFinished = style.trackedTextField(
             self.object,
             "##liftSetupElevatorNodeRef",
-            sanitizeConnectionValue(self.nodeRef),
+            utils.sanitizeText(self.nodeRef),
             "NodeRef...",
             elevatorNodeRefFieldWidth
         )
@@ -659,7 +618,7 @@ function quickElevatorSetupUI.install(device, options)
 
         ImGui.Dummy(0, 4 * style.viewSize)
 
-        local liftComponentID = self:getPersistentComponentID(self, liftControllerClass, self.psControllerID)
+        local liftComponentID = self:getPersistentComponentID(self, LIFT_CONTROLLER_CLASS, self.psControllerID)
         local liftSetupPath = { "persistentState", "Data", "liftSetup" }
         local liftSetup = liftComponentID and self:getComponentPathValue(self, liftComponentID, liftSetupPath) or nil
 

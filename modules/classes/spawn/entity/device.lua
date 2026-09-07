@@ -9,6 +9,7 @@ local quickElevatorSetupUI = require("modules/utils/ui/quickElevatorSetup")
 local quickSoundSystemSetupUI = require("modules/utils/ui/quickSoundSystemSetup")
 local quickDeviceOperationsSetupUI = require("modules/utils/ui/quickDeviceOperationsSetup")
 local quickTransformAnimationSetupUI = require("modules/utils/ui/quickTransformAnimationSetup")
+local quickSecuritySetupUI = require("modules/utils/ui/quickSecuritySetup")
 local positionableGroup = require("modules/classes/editor/positionableGroup")
 local spawnableElement = require("modules/classes/editor/spawnableElement")
 local staticMarker = require("modules/classes/spawn/meta/staticMarker")
@@ -16,6 +17,9 @@ local elevatorDoors = require("modules/utils/data/elevatorDoors")
 local soundSystemData = require("modules/utils/data/soundSystem")
 local deviceOperationsData = require("modules/utils/data/deviceOperations")
 local transformAnimationsData = require("modules/utils/data/transformAnimations")
+local securitySystemData = require("modules/utils/data/securitySystem")
+local redValue = require("modules/utils/data/redValue")
+local outlineConsumer = require("modules/utils/game/outlineConsumer")
 
 local POSITION_MARKER_COLOR = "blue"
 local LIFT_CONTROLLER_CLASS = "LiftControllerPS"
@@ -23,8 +27,6 @@ local ELEVATOR_FLOOR_CONTROLLER_CLASS = "ElevatorFloorTerminalControllerPS"
 local ELEVATOR_FLOOR_TERMINAL_PATH = "base\\gameplay\\devices\\elevators\\terminals\\elevator_floor_terminal_1.ent"
 local ELEVATOR_FLOOR_TERMINAL_COMPONENT_ID = "1394923055520256000"
 local DEFAULT_DOOR_CONNECTION_CLASS = "DoorControllerPS"
-local SOUND_SYSTEM_CONTROLLER_CLASS = soundSystemData.SOUND_SYSTEM_CONTROLLER_CLASS
-local SPEAKER_CONTROLLER_CLASS = soundSystemData.SPEAKER_CONTROLLER_CLASS
 local LIFT_FLOOR_DOOR_DEFINITIONS = {
     common = {
         key = "common",
@@ -60,20 +62,6 @@ local propertyNames = {
 ---@field public showSpeakerRangeSphere boolean Speaker only: draw the audible radius, as a sphere in the world and a ring on screen
 local device = setmetatable({}, { __index = entity })
 
----@type fun(value: any, fallback: any?): string
-local sanitizeConnectionValue = utils.sanitizeText
-
----@param value any
----@param defaultValue number?
----@return number
-local function boolToInt(value, defaultValue)
-    if value == nil then
-        value = defaultValue
-    end
-
-    return (value == true or value == 1) and 1 or 0
-end
-
 ---@param doorType string?
 ---@return table?
 local function getLiftFloorDoorDefinition(doorType)
@@ -102,7 +90,7 @@ end
 ---@return table
 local function buildNodeRefHashValue(nodeRef, storage)
     local nodeRefStorage = normalizeNodeRefStorage(storage)
-    local normalizedNodeRef = sanitizeConnectionValue(nodeRef)
+    local normalizedNodeRef = utils.sanitizeText(nodeRef)
     local value
 
     if nodeRefStorage == "string" then
@@ -194,9 +182,7 @@ function device:onAssemble(entRef)
 
     for _, component in pairs(entRef:GetComponents()) do
         if component:IsA("gameDeviceComponent") then
-            -- Is used to identify the correct component for the device, which is required for loading the persistent state of the device properly.
-            -- The component name is used as part of the key when storing the persistent state in the .psrep file, so it needs to be consistent and correctly set.
-            -- Otherwise the game will look for the wrong component in the .psrep file and fail to load it.
+            -- Persistent state is keyed by component name in the `.psrep`.
             self.controllerComponent = component.name.value
 
             break
@@ -208,13 +194,18 @@ function device:onAssemble(entRef)
     -- Added on every speaker rather than on demand: `AddComponent` after the entity is attached is
     -- unreliable, and a disabled mesh component costs nothing. The real radius is only read when
     -- the sphere is actually wanted, so the common case never touches the persistent state here.
-    if self.deviceClassName == SPEAKER_CONTROLLER_CLASS then
+    if self.deviceClassName == soundSystemData.SPEAKER_CONTROLLER_CLASS then
         local size = self.showSpeakerRangeSphere
             and self:getSpeakerRangeSphereSize()
             or { x = 0.01, y = 0.01, z = 0.01 }
 
         visualizer.addSphere(entRef, size, soundSystemData.RANGE_SPHERE_COLOR, soundSystemData.RANGE_SPHERE_COMPONENT)
         self:updateSpeakerRangeSphere(entRef)
+    end
+
+    -- Refresh security-area outline bindings after component data is available.
+    if self:isOutlineHost() then
+        self:refreshOutlineBinding()
     end
 end
 
@@ -246,7 +237,7 @@ function device:updateSpeakerRangeSphere(entityRef, rangeOverride)
 
     -- Reading the radius means reading the persistent state, so it only happens when the sphere is
     -- going to be shown.
-    if self.deviceClassName ~= SPEAKER_CONTROLLER_CLASS or self.showSpeakerRangeSphere ~= true then
+    if self.deviceClassName ~= soundSystemData.SPEAKER_CONTROLLER_CLASS or self.showSpeakerRangeSphere ~= true then
         if sphere:IsEnabled() then
             sphere:Toggle(false)
         end
@@ -284,8 +275,598 @@ function device:save()
     data.showDoorsHelper = self.showDoorsHelper
     data.showSpeakerHelper = self.showSpeakerHelper
     data.showSpeakerRangeSphere = self.showSpeakerRangeSphere
+    -- nil on every device that is not a security area, which keeps the key out of their saved data
+    -- and out of the area-node duck test in `spawnedUI`.
+    data.outlinePath = self.outlinePath
 
     return data
+end
+
+-- Outline binding --------------------------------------------------------------------------------
+--
+-- Security areas bind their trigger volume to an outline marker group. Other devices leave
+-- `outlinePath` nil so existing area-node duck typing ignores them.
+
+---@return boolean
+function device:isOutlineHost()
+    return self.spawnData == securitySystemData.SECURITY_AREA_PATH
+end
+
+function device:loadSpawnData(data, position, rotation)
+    entity.loadSpawnData(self, data, position, rotation)
+
+    -- `outlinePath` is absent on plain devices, so restore it explicitly.
+    if data.outlinePath ~= nil then
+        self.outlinePath = data.outlinePath
+    elseif self:isOutlineHost() and self.outlinePath == nil then
+        self.outlinePath = ""
+    end
+
+    -- Project load, paste and undo can all change outline bindings.
+    outlineConsumer.invalidate()
+end
+
+function device:loadOutlinePaths()
+    return outlineConsumer.loadPaths(self)
+end
+
+---The `area` component holding the outline, when loaded.
+---@return string?
+function device:getAreaShapeComponentID()
+    local componentID = self.findComponentIDByType
+        and self:findComponentIDByType(securitySystemData.AREA_SHAPE_COMPONENT_CLASS)
+        or nil
+
+    if componentID then
+        return componentID
+    end
+
+    -- Fallback once component data is loaded.
+    if self.defaultComponentData and self.defaultComponentData[securitySystemData.AREA_SHAPE_COMPONENT_ID] then
+        return securitySystemData.AREA_SHAPE_COMPONENT_ID
+    end
+
+    return nil
+end
+
+---Loads the rest of the components so the outline can be written. Call on popup open, not per frame.
+---@return string?
+function device:ensureAreaShapeLoaded()
+    local componentID = self:getAreaShapeComponentID()
+    if componentID then return componentID end
+
+    local entityRef = self.getEntity and self:getEntity() or nil
+    if not entityRef or not self.loadInstanceData then return nil end
+
+    local ok = pcall(function ()
+        self:loadInstanceData(entityRef, true)
+    end)
+    if not ok then return nil end
+
+    return self:getAreaShapeComponentID()
+end
+
+---Writes the bound outline onto the `area` component without respawning.
+---@return boolean written
+function device:refreshOutlineBinding()
+    if not self:isOutlineHost() then return false end
+
+    local outlinePath = self.outlinePath
+    if not outlinePath or outlinePath == "" or outlinePath == "None" then return false end
+
+    -- Force-load the trigger component once if only controller data is present.
+    local componentID = self:ensureAreaShapeLoaded()
+    if not componentID then return false end
+
+    local points, height = outlineConsumer.getLocalPoints(self)
+    if #points < outlineConsumer.MIN_MARKERS then return false end
+
+    -- Outline points are stored in the node's local frame.
+    local rotation = self.rotation
+    local hasRotation = rotation and (rotation.roll ~= 0 or rotation.pitch ~= 0 or rotation.yaw ~= 0)
+
+    if hasRotation then
+        local quat = rotation:ToQuat()
+
+        for _, point in ipairs(points) do
+            local local_ = quat:TransformInverse(Vector4.new(point.X, point.Y, point.Z, 0))
+            point.X, point.Y, point.Z = local_.x, local_.y, local_.z
+        end
+    end
+
+    local outline = securitySystemData.newOutline(points, height)
+
+    -- Dragging calls `update` every frame; write only real geometry changes.
+    local current = self:getComponentPathValue(self, componentID, securitySystemData.OUTLINE_PATH)
+    if securitySystemData.outlineMatches(current, outline) then return false end
+
+    self:updateComponentPathValue(self, componentID, securitySystemData.OUTLINE_PATH, outline, {
+        suppressRespawn = true
+    })
+
+    return true
+end
+
+---Called by `outlineConsumer` when the bound marker group changes.
+function device:onOutlineChanged()
+    self:refreshOutlineBinding()
+end
+
+-- Security network wiring ------------------------------------------------------------------------
+--
+-- The Quick Security `+` actions create nodes, assign NodeRefs, wire connections and record one
+-- composite undo action.
+
+---Creates a child device node under `parent`.
+---@param parent element
+---@param options table `{ spawnData, app, controllerClass, namePrefix, position, rotation, persistent, deviceConnections }`
+---@return element element
+---@return table spawnable
+function device:createChildDeviceNode(parent, options)
+    options = options or {}
+
+    if not self.object or not parent then
+        return nil, nil
+    end
+
+    local seed = device:new()
+    seed:loadSpawnData({
+        spawnData = options.spawnData,
+        app = options.app,
+        nodeRef = "",
+        persistent = false,
+        deviceClassName = options.controllerClass,
+        deviceConnections = utils.deepcopy(options.deviceConnections or {}),
+        instanceDataChanges = utils.deepcopy(options.instanceDataChanges or {}),
+        defaultComponentData = utils.deepcopy(options.defaultComponentData or {})
+    }, options.position, options.rotation)
+
+    local newElement = spawnableElement:new(self.object.sUI)
+    newElement:load({
+        name = self:getNextChildName(parent, options.namePrefix or "Device"),
+        spawnable = seed:save(),
+        modulePath = "modules/classes/editor/spawnableElement"
+    })
+    newElement:setParent(parent)
+    parent.headerOpen = true
+
+    self:refreshNodeRefCaches()
+
+    local newSpawnable = newElement.spawnable
+    newSpawnable.nodeRef = utils.sanitizeText(registry.generate(newElement))
+    newSpawnable.deviceClassName = utils.sanitizeText(options.controllerClass)
+
+    if options.persistent ~= nil then
+        newSpawnable.persistent = options.persistent == true and newSpawnable.nodeRef ~= ""
+    end
+
+    self:refreshNodeRefCaches()
+
+    return newElement, newSpawnable
+end
+
+---Creates a device node under `parent` and returns it, wired to nothing yet.
+---@param parent element
+---@param spawnData string Entity path
+---@param controllerClass string
+---@param namePrefix string
+---@param position Vector4
+---@param rotation EulerAngles
+---@return element element
+---@return table spawnable
+function device:createSecurityNode(parent, spawnData, controllerClass, namePrefix, position, rotation)
+    return self:createChildDeviceNode(parent, {
+        spawnData = spawnData,
+        app = "default",
+        controllerClass = controllerClass,
+        namePrefix = namePrefix,
+        position = position,
+        rotation = rotation,
+        persistent = true
+    })
+end
+
+---Adds a connection row on this device, unless one already points at the same NodeRef.
+---@param className string
+---@param nodeRef string
+---@return boolean added
+function device:addSecurityConnection(className, nodeRef)
+    local cleanClass = utils.sanitizeText(className)
+    local cleanRef = utils.sanitizeText(nodeRef)
+
+    if cleanClass == "" or cleanRef == "" then
+        return false
+    end
+
+    for _, connection in ipairs(self.deviceConnections) do
+        if utils.sanitizeText(connection.deviceClassName) == cleanClass
+            and utils.sanitizeText(connection.nodeRef) == cleanRef then
+            return false
+        end
+    end
+
+    table.insert(self.deviceConnections, {
+        deviceClassName = cleanClass,
+        nodeRef = cleanRef
+    })
+
+    return true
+end
+
+---Spawns an outline marker group around this device and binds it.
+---No history is pushed here; callers compose it with their broader action.
+---@param parentOverride element? Group to build under; defaults to this device's own parent
+---@return element? outlineGroup
+function device:addSecurityOutline(parentOverride)
+    local parent = parentOverride or (self.object and self.object.parent) or nil
+
+    if not self.object or not parent then
+        return nil
+    end
+
+    local outlineGroup = outlineConsumer.createMarkerGroup(self, parent, {
+        namePrefix = securitySystemData.NEW_OUTLINE_GROUP_NAME,
+        offsets = securitySystemData.getNewOutlineOffsets(),
+        height = securitySystemData.NEW_OUTLINE_HEIGHT
+    })
+    if not outlineGroup then
+        return nil
+    end
+
+    self:refreshNodeRefCaches()
+
+    -- Bind after cache refresh so the new path is valid.
+    self.outlinePath = outlineGroup.getPath and outlineGroup:getPath() or ""
+    outlineConsumer.invalidate()
+
+    if self.refreshOutlineBinding then
+        self:refreshOutlineBinding()
+    end
+
+    return outlineGroup
+end
+
+---Spawns a security area, outline markers, binding and master connection in one action.
+---@return element? areaElement
+function device:addSecurityArea()
+    if not self.object or not self.object.parent or self.object:isLocked() then
+        return nil
+    end
+
+    local actions = {}
+    local parent, wrapAction = self:getQuickSetupChildParent()
+    if wrapAction then
+        table.insert(actions, wrapAction)
+    end
+
+    if not parent then
+        return nil
+    end
+
+    -- Start on the system; the author can drag it into place.
+    local position = Vector4.new(self.position.x, self.position.y, self.position.z, 0)
+    -- Keep new area nodes unrotated so marker offsets export directly.
+    local rotation = EulerAngles.new(0, 0, 0)
+
+    local areaElement, areaSpawnable = self:createSecurityNode(
+        parent,
+        securitySystemData.SECURITY_AREA_PATH,
+        securitySystemData.SECURITY_AREA_CONTROLLER_CLASS,
+        "SecurityArea",
+        position,
+        rotation
+    )
+    if not areaElement or not areaSpawnable then
+        return nil
+    end
+
+    -- Keep markers beside the area so hierarchy moves keep them together.
+    local outlineGroup = areaSpawnable:addSecurityOutline(parent)
+
+    -- Default new areas to the safer/common RESTRICTED type.
+    self:updateComponentPathValue(
+        areaSpawnable,
+        securitySystemData.SECURITY_AREA_COMPONENT_ID,
+        securitySystemData.AREA_TYPE_PATH,
+        securitySystemData.DEFAULT_AREA_TYPE,
+        { suppressRespawn = true }
+    )
+
+    table.insert(actions, history.getElementChange(self.object))
+    self:addSecurityConnection(securitySystemData.SECURITY_AREA_CONTROLLER_CLASS, areaSpawnable.nodeRef)
+
+    table.insert(actions, history.getInsert(outlineGroup and { areaElement, outlineGroup } or { areaElement }))
+
+    self:refreshNodeRefCaches()
+
+    if #actions > 1 then
+        history.addAction(history.getComposite(actions))
+    elseif #actions == 1 then
+        history.addAction(actions[1])
+    end
+
+    return areaElement
+end
+
+---Spawns one of the devices a security network drives and connects it to this device.
+---@param key string Key from `securitySystem.SLAVE_CLASSES`
+---@param spawnData string? One of the entry's `variants` paths, or nil for its default
+---@return element? slaveElement
+function device:addSecuritySlave(key, spawnData)
+    if not self.object or not self.object.parent or self.object:isLocked() then
+        return nil
+    end
+
+    local definition = securitySystemData.getSlaveDefinition(tostring(key or ""))
+    local slavePath = securitySystemData.resolveSlaveSpawnData(definition, spawnData)
+    if not slavePath then
+        return nil
+    end
+
+    local actions = {}
+    local parent, wrapAction = self:getQuickSetupChildParent()
+    if wrapAction then
+        table.insert(actions, wrapAction)
+    end
+
+    if not parent then
+        return nil
+    end
+
+    local position = Vector4.new(self.position.x, self.position.y, self.position.z, 0)
+    local rotation = EulerAngles.new(self.rotation.roll, self.rotation.pitch, self.rotation.yaw)
+
+    local slaveElement, slaveSpawnable = self:createSecurityNode(
+        parent,
+        slavePath,
+        definition.class,
+        definition.namePrefix or "SecurityDevice",
+        position,
+        rotation
+    )
+    if not slaveElement or not slaveSpawnable then
+        return nil
+    end
+
+    table.insert(actions, history.getElementChange(self.object))
+    self:addSecurityConnection(definition.class, slaveSpawnable.nodeRef)
+    table.insert(actions, history.getInsert({ slaveElement }))
+
+    self:refreshNodeRefCaches()
+
+    if #actions > 1 then
+        history.addAction(history.getComposite(actions))
+    elseif #actions == 1 then
+        history.addAction(actions[1])
+    end
+
+    return slaveElement
+end
+
+---Spawns a security system for this area and points it back here.
+---@return element? systemElement
+function device:addSecuritySystemForArea()
+    if not self.object or not self.object.parent or self.object:isLocked() then
+        return nil
+    end
+
+    if utils.sanitizeText(self.nodeRef) == "" then
+        return nil
+    end
+
+    local actions = {}
+    local parent, wrapAction = self:getQuickSetupChildParent()
+    if wrapAction then
+        table.insert(actions, wrapAction)
+    end
+
+    if not parent then
+        return nil
+    end
+
+    local systemElement, systemSpawnable = self:createSecurityNode(
+        parent,
+        securitySystemData.SECURITY_SYSTEM_PATH,
+        securitySystemData.SECURITY_SYSTEM_CONTROLLER_CLASS,
+        "SecuritySystem",
+        Vector4.new(self.position.x, self.position.y, self.position.z, 0),
+        EulerAngles.new(0, 0, 0)
+    )
+    if not systemElement or not systemSpawnable then
+        return nil
+    end
+
+    -- The script starts at TEMPORARLY, letting a provoked faction settle back after the fight.
+    self:updateComponentPathValue(
+        systemSpawnable,
+        securitySystemData.SECURITY_SYSTEM_COMPONENT_ID,
+        securitySystemData.ATTITUDE_MODE_PATH,
+        securitySystemData.DEFAULT_ATTITUDE_MODE,
+        { suppressRespawn = true }
+    )
+
+    -- The area link lives on the system.
+    systemSpawnable:addSecurityConnection(securitySystemData.SECURITY_AREA_CONTROLLER_CLASS, self.nodeRef)
+
+    table.insert(actions, history.getInsert({ systemElement }))
+
+    self:refreshNodeRefCaches()
+
+    if #actions > 1 then
+        history.addAction(history.getComposite(actions))
+    elseif #actions == 1 then
+        history.addAction(actions[1])
+    end
+
+    return systemElement
+end
+
+---Removes a connection row by index.
+---@param connectionIndex number
+---@return boolean removed
+function device:removeSecurityConnection(connectionIndex)
+    local index = tonumber(connectionIndex)
+
+    if not index or not self.deviceConnections[index] then
+        return false
+    end
+
+    history.addAction(history.getElementChange(self.object))
+    table.remove(self.deviceConnections, index)
+    registry.invalidate()
+
+    return true
+end
+
+---Bound outline marker group for an area, when it resolves under the same root.
+---@param areaSpawnable table?
+---@return element?
+function device:resolveSecurityOutlineGroup(areaSpawnable)
+    local path = areaSpawnable and areaSpawnable.outlinePath or nil
+
+    if type(path) ~= "string" or path == "" or path == "None" then
+        return nil
+    end
+
+    local object = areaSpawnable.object
+    local sUI = object and object.sUI or nil
+    local group = sUI and sUI.getElementByPath and sUI.getElementByPath(path) or nil
+
+    if not group or not group.getRootParent or not object.getRootParent then
+        return nil
+    end
+
+    -- A path that resolves into another root is a stale binding, not this area's markers.
+    return group:getRootParent() == object:getRootParent() and group or nil
+end
+
+---Removes a security connection, and optionally the target node plus its outline group.
+---All rows pointing at the same NodeRef are removed.
+---@param entry table Network entry `{ connection, nodeRef, spawnable, element }`
+---@param deleteNode boolean Remove the target element as well
+---@return boolean removed
+function device:removeSecurityNode(entry, deleteNode)
+    if not entry then
+        return false
+    end
+
+    local targetNodeRef = utils.sanitizeText(entry.nodeRef)
+    local removedConnection = false
+
+    for index = #self.deviceConnections, 1, -1 do
+        local candidate = self.deviceConnections[index]
+        local sameConnection = entry.connection ~= nil and candidate == entry.connection
+        local sameNodeRef = targetNodeRef ~= ""
+            and utils.sanitizeText(candidate.nodeRef) == targetNodeRef
+
+        if sameConnection or sameNodeRef then
+            self.connectionNodeRefSearch[tostring(candidate)] = nil
+            table.remove(self.deviceConnections, index)
+            removedConnection = true
+        end
+    end
+
+    local removedElements = {}
+
+    if deleteNode and entry.element then
+        table.insert(removedElements, entry.element)
+
+        local outlineGroup = self:resolveSecurityOutlineGroup(entry.spawnable)
+        if outlineGroup then
+            table.insert(removedElements, outlineGroup)
+        end
+    end
+
+    local removeAction = nil
+    if #removedElements > 0 then
+        -- Snapshot before detach so undo can restore original positions.
+        removeAction = history.getRemove(removedElements)
+
+        for _, element in ipairs(removedElements) do
+            element:remove()
+        end
+    end
+
+    if not removedConnection and not removeAction then
+        return false
+    end
+
+    local actions = { history.getElementChange(self.object) }
+    if removeAction then
+        table.insert(actions, removeAction)
+    end
+
+    if #actions > 1 then
+        history.addAction(history.getComposite(actions))
+    else
+        history.addAction(actions[1])
+    end
+
+    self:refreshNodeRefCaches()
+    outlineConsumer.invalidate()
+
+    return true
+end
+---Spawns a community node and connects it, so the network has NPCs to alert.
+---@return element? communityElement
+function device:addSecurityCommunity()
+    if not self.object or not self.object.parent or self.object:isLocked() then
+        return nil
+    end
+
+    local actions = {}
+    local parent, wrapAction = self:getQuickSetupChildParent()
+    if wrapAction then
+        table.insert(actions, wrapAction)
+    end
+
+    if not parent then
+        return nil
+    end
+
+    local communityClass = require("modules/classes/spawn/ai/communityArea")
+    local seed = communityClass:new()
+    seed:loadSpawnData(
+        {},
+        Vector4.new(self.position.x, self.position.y, self.position.z, 0),
+        EulerAngles.new(0, 0, 0)
+    )
+
+    local communityElement = spawnableElement:new(self.object.sUI)
+    communityElement:load({
+        name = self:getNextChildName(parent, "Community"),
+        spawnable = seed:save(),
+        modulePath = "modules/classes/editor/spawnableElement"
+    })
+    communityElement:setParent(parent)
+    parent.headerOpen = true
+
+    self:refreshNodeRefCaches()
+
+    local communitySpawnable = communityElement.spawnable
+    communitySpawnable.nodeRef = utils.sanitizeText(registry.generate(communityElement))
+    self:refreshNodeRefCaches()
+
+    table.insert(actions, history.getElementChange(self.object))
+    self:addSecurityConnection(securitySystemData.COMMUNITY_PROXY_CLASS, communitySpawnable.nodeRef)
+    table.insert(actions, history.getInsert({ communityElement }))
+
+    self:refreshNodeRefCaches()
+
+    if #actions > 1 then
+        history.addAction(history.getComposite(actions))
+    elseif #actions == 1 then
+        history.addAction(actions[1])
+    end
+
+    return communityElement
+end
+
+function device:update()
+    entity.update(self)
+
+    -- The points are relative to this node, so moving the device changes them too.
+    self:refreshOutlineBinding()
 end
 
 ---@param currentValue string
@@ -307,7 +888,7 @@ function device:getConnectionNodeRefOptions(currentValue)
 
     table.sort(options)
 
-    local cleanCurrentValue = sanitizeConnectionValue(currentValue)
+    local cleanCurrentValue = utils.sanitizeText(currentValue)
     if cleanCurrentValue ~= "" and utils.indexValue(options, cleanCurrentValue) == -1 then
         table.insert(options, 1, cleanCurrentValue)
     end
@@ -319,7 +900,7 @@ end
 ---@return string?
 function device:resolveConnectionClassName(nodeRef)
     local spawnable = registry.getSpawnableByNodeRef(self.object, nodeRef)
-    local className = spawnable and sanitizeConnectionValue(spawnable.deviceClassName) or ""
+    local className = spawnable and utils.sanitizeText(spawnable.deviceClassName) or ""
 
     if className ~= "" then
         return className
@@ -331,7 +912,7 @@ end
 ---@param nodeRef string
 ---@return spawnable?, string
 function device:resolveConnectionTargetSpawnable(nodeRef)
-    local cleanNodeRef = sanitizeConnectionValue(nodeRef)
+    local cleanNodeRef = utils.sanitizeText(nodeRef)
     if cleanNodeRef == "" then
         return nil, cleanNodeRef
     end
@@ -364,7 +945,7 @@ function device:resolveConnectionTargetSpawnable(nodeRef)
             for _, path in ipairs(root:getPathsRecursive(true)) do
                 local ref = path.ref
                 if utils.isA(ref, "spawnableElement") and ref.spawnable then
-                    local candidate = sanitizeConnectionValue(ref.spawnable.nodeRef)
+                    local candidate = utils.sanitizeText(ref.spawnable.nodeRef)
                     if candidate ~= "" and (candidate == cleanNodeRef or utils.nodeRefStringToHashString(candidate) == cleanNodeRef) then
                         spawnable = ref.spawnable
                         resolvedNodeRef = candidate
@@ -378,6 +959,164 @@ function device:resolveConnectionTargetSpawnable(nodeRef)
     return spawnable, resolvedNodeRef
 end
 
+function device:refreshNodeRefCaches()
+    registry.invalidate()
+
+    if self.object and self.object.sUI and self.object.sUI.cachePaths then
+        self.object.sUI.cachePaths()
+    end
+end
+
+---Updates one node's NodeRef, and optionally every connection row pointing at the old ref.
+---@param targetSpawnable table?
+---@param targetElement element?
+---@param newNodeRef string
+---@param options table? `{ currentNodeRef, includeOwnerChange, updateReferrers, rewriteReferrersOnSameValue, onUpdated }`
+---@return boolean updated
+function device:updateNodeRefAndReferrers(targetSpawnable, targetElement, newNodeRef, options)
+    if not targetSpawnable then
+        return false
+    end
+
+    local normalizedNodeRef = utils.sanitizeText(newNodeRef)
+    if normalizedNodeRef == "" then
+        return false
+    end
+
+    local opts = options or {}
+    local currentNodeRef = utils.sanitizeText(opts.currentNodeRef or targetSpawnable.nodeRef)
+    local shouldRewrite = opts.rewriteReferrersOnSameValue == true
+
+    if normalizedNodeRef == currentNodeRef and not shouldRewrite then
+        return false
+    end
+
+    local changes = {}
+    local changedElements = {}
+    local function addElementChange(elementRef)
+        if elementRef and not changedElements[elementRef] then
+            table.insert(changes, history.getElementChange(elementRef))
+            changedElements[elementRef] = true
+        end
+    end
+
+    addElementChange(targetElement or self.object)
+
+    if opts.includeOwnerChange then
+        addElementChange(self.object)
+    end
+
+    local referrers = {}
+    local updateReferrers = opts.updateReferrers ~= false
+    local currentHash = currentNodeRef ~= "" and utils.nodeRefStringToHashString(currentNodeRef) or nil
+
+    if updateReferrers and currentNodeRef ~= "" and self.object and self.object.getRootParent then
+        local root = self.object:getRootParent()
+
+        if root and root.getPathsRecursive then
+            for _, path in ipairs(root:getPathsRecursive(true)) do
+                local ref = path.ref
+                local spawnable = utils.isA(ref, "spawnableElement") and ref.spawnable or nil
+
+                if spawnable and type(spawnable.deviceConnections) == "table" then
+                    for _, connection in ipairs(spawnable.deviceConnections) do
+                        local targetRef = utils.sanitizeText(connection.nodeRef)
+
+                        if targetRef ~= "" and (
+                            targetRef == currentNodeRef
+                            or targetRef == currentHash
+                            or utils.nodeRefStringToHashString(targetRef) == currentHash
+                        ) then
+                            addElementChange(ref)
+                            table.insert(referrers, connection)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if #changes > 1 then
+        history.addAction(history.getComposite(changes))
+    elseif #changes == 1 then
+        history.addAction(changes[1])
+    end
+
+    targetSpawnable.nodeRef = normalizedNodeRef
+
+    for _, connection in ipairs(referrers) do
+        connection.nodeRef = normalizedNodeRef
+    end
+
+    if opts.onUpdated then
+        opts.onUpdated(normalizedNodeRef, referrers)
+    end
+
+    self:refreshNodeRefCaches()
+
+    return true
+end
+
+---Device connection rows resolved to their target spawnables.
+---@param sourceSpawnable table?
+---@param options table? `{ className, excludeClasses, requireNodeRef, filter, decorate }`
+---@return table[]
+function device:getResolvedDeviceConnections(sourceSpawnable, options)
+    if not sourceSpawnable or type(sourceSpawnable.deviceConnections) ~= "table" then
+        return {}
+    end
+
+    registry.update()
+
+    local opts = options or {}
+    local wantedClass = opts.className and utils.sanitizeText(opts.className) or nil
+    local excludeClasses = opts.excludeClasses or {}
+    local entries = {}
+
+    for connectionIndex, connection in ipairs(sourceSpawnable.deviceConnections) do
+        local className = utils.sanitizeText(connection.deviceClassName)
+        local rawNodeRef = utils.sanitizeText(connection.nodeRef)
+        local keep = className ~= ""
+
+        if keep and wantedClass and className ~= wantedClass then
+            keep = false
+        end
+
+        if keep and excludeClasses[className] then
+            keep = false
+        end
+
+        if keep and opts.requireNodeRef and rawNodeRef == "" then
+            keep = false
+        end
+
+        if keep and opts.filter then
+            keep = opts.filter(connection, className, rawNodeRef, connectionIndex) == true
+        end
+
+        if keep then
+            local targetSpawnable, resolvedNodeRef = sourceSpawnable:resolveConnectionTargetSpawnable(rawNodeRef)
+            local entry = {
+                connection = connection,
+                connectionIndex = connectionIndex,
+                rawNodeRef = rawNodeRef,
+                className = className,
+                nodeRef = resolvedNodeRef ~= "" and resolvedNodeRef or rawNodeRef,
+                spawnable = targetSpawnable,
+                element = targetSpawnable and targetSpawnable.object or nil
+            }
+
+            if opts.decorate then
+                opts.decorate(entry)
+            end
+
+            table.insert(entries, entry)
+        end
+    end
+
+    return entries
+end
+
 ---@param targetSpawnable entity
 ---@param className string
 ---@param fallbackComponentID string?
@@ -387,7 +1126,7 @@ function device:getPersistentComponentID(targetSpawnable, className, fallbackCom
         return nil
     end
 
-    className = sanitizeConnectionValue(className)
+    className = utils.sanitizeText(className)
 
     local function scanComponentData(source)
         for componentID, componentData in pairs(source or {}) do
@@ -707,14 +1446,14 @@ function device:normalizeElevatorFloorSetup(floorSetup, markerNodeRef)
     normalized["$type"] = "ElevatorFloorSetup"
     normalized.floorName = tostring(normalized.floorName or "")
     normalized.authorizationTextOverride = tostring(normalized.authorizationTextOverride or "")
-    normalized.isHidden = boolToInt(normalized.isHidden, 0)
-    normalized.isInactive = boolToInt(normalized.isInactive, 0)
+    normalized.isHidden = redValue.boolToInt(normalized.isHidden, 0)
+    normalized.isInactive = redValue.boolToInt(normalized.isInactive, 0)
 
     local doors = normalized.doorShouldOpenFrontLeftRight or { 1, 1, 1 }
     normalized.doorShouldOpenFrontLeftRight = {
-        boolToInt(doors[1], 1),
-        boolToInt(doors[2], 1),
-        boolToInt(doors[3], 1)
+        redValue.boolToInt(doors[1], 1),
+        redValue.boolToInt(doors[2], 1),
+        redValue.boolToInt(doors[3], 1)
     }
 
     if type(normalized.floorDisplayName) ~= "table" then
@@ -743,7 +1482,7 @@ function device:normalizeElevatorFloorSetup(floorSetup, markerNodeRef)
         normalized.floorMarker["$storage"] = markerStorage
 
         if markerStorage == "string" then
-            normalized.floorMarker["$value"] = sanitizeConnectionValue(normalized.floorMarker["$value"])
+            normalized.floorMarker["$value"] = utils.sanitizeText(normalized.floorMarker["$value"])
         else
             local markerValue = tostring(normalized.floorMarker["$value"] or "0")
             markerValue = utils.trimString(markerValue)
@@ -808,16 +1547,22 @@ function device:ensureOwnParentGroup()
     self.object:setParent(wrapper)
     local insertDevice = history.getInsert({ self.object })
 
-    registry.invalidate()
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
+    self:refreshNodeRefCaches()
 
     return wrapper, history.getMoveToNewGroup(insertGroup, removeDevice, insertDevice)
 end
 
 ---@return element?, table?
-function device:ensureLiftParentGroup()
+function device:getQuickSetupChildParent()
+    if not self.object or not self.object.parent then
+        return nil, nil
+    end
+
+    local parent = self.object.parent
+    if utils.isA(parent, "positionableGroup") then
+        return parent, nil
+    end
+
     return self:ensureOwnParentGroup()
 end
 
@@ -848,8 +1593,8 @@ function device:getLiftFloorEntries()
     local entries = {}
 
     for connectionIndex, connection in ipairs(self.deviceConnections) do
-        local className = sanitizeConnectionValue(connection.deviceClassName)
-        local rawNodeRef = sanitizeConnectionValue(connection.nodeRef)
+        local className = utils.sanitizeText(connection.deviceClassName)
+        local rawNodeRef = utils.sanitizeText(connection.nodeRef)
 
         if className == ELEVATOR_FLOOR_CONTROLLER_CLASS and rawNodeRef ~= "" then
             local terminalSpawnable, resolvedNodeRef = self:resolveConnectionTargetSpawnable(rawNodeRef)
@@ -952,20 +1697,20 @@ function device:getLiftFloorDoorEntries(entry)
         local definitionKey = LIFT_FLOOR_DOOR_BY_SPAWNDATA[spawnData]
         local definition = definitionKey and LIFT_FLOOR_DOOR_DEFINITIONS[definitionKey] or nil
 
-        local finalNodeRef = sanitizeConnectionValue(resolvedNodeRef)
+        local finalNodeRef = utils.sanitizeText(resolvedNodeRef)
         if finalNodeRef == "" then
-            finalNodeRef = sanitizeConnectionValue(rawNodeRef)
+            finalNodeRef = utils.sanitizeText(rawNodeRef)
         end
 
-        local className = sanitizeConnectionValue(connection and connection.deviceClassName or "")
+        local className = utils.sanitizeText(connection and connection.deviceClassName or "")
         if className == "" and doorSpawnable then
-            className = sanitizeConnectionValue(doorSpawnable.deviceClassName)
+            className = utils.sanitizeText(doorSpawnable.deviceClassName)
         end
 
         table.insert(floorDoorEntries, {
             connection = connection,
             connectionIndex = connectionIndex,
-            rawNodeRef = sanitizeConnectionValue(rawNodeRef),
+            rawNodeRef = utils.sanitizeText(rawNodeRef),
             nodeRef = finalNodeRef,
             doorSpawnable = doorSpawnable,
             doorElement = doorElement,
@@ -981,8 +1726,8 @@ function device:getLiftFloorDoorEntries(entry)
     end
 
     for connectionIndex, connection in ipairs(terminalSpawnable.deviceConnections) do
-        local className = sanitizeConnectionValue(connection.deviceClassName)
-        local rawNodeRef = sanitizeConnectionValue(connection.nodeRef)
+        local className = utils.sanitizeText(connection.deviceClassName)
+        local rawNodeRef = utils.sanitizeText(connection.nodeRef)
         if rawNodeRef ~= "" then
             local doorSpawnable, resolvedNodeRef = self:resolveConnectionTargetSpawnable(rawNodeRef)
             local doorElement = doorSpawnable and doorSpawnable.object or nil
@@ -1007,7 +1752,7 @@ function device:getLiftFloorDoorEntries(entry)
                 local spawnData = string.lower(tostring(child.spawnable.spawnData or ""))
                 local definitionKey = LIFT_FLOOR_DOOR_BY_SPAWNDATA[spawnData]
                 if definitionKey then
-                    local childNodeRef = sanitizeConnectionValue(child.spawnable.nodeRef)
+                    local childNodeRef = utils.sanitizeText(child.spawnable.nodeRef)
                     if childNodeRef ~= "" and not seenNodeRefs[childNodeRef] then
                         appendDoorEntry(nil, nil, childNodeRef, childNodeRef, child.spawnable)
                     end
@@ -1092,10 +1837,10 @@ function device:addLiftFloorDoor(entry, doorType)
     doorSpawnable.nodeRef = registry.generate(doorElement)
     registry.invalidate()
 
-    local doorNodeRef = sanitizeConnectionValue(doorSpawnable.nodeRef)
-    local connectionClassName = sanitizeConnectionValue(doorSpawnable.deviceClassName)
+    local doorNodeRef = utils.sanitizeText(doorSpawnable.nodeRef)
+    local connectionClassName = utils.sanitizeText(doorSpawnable.deviceClassName)
     if connectionClassName == "" then
-        connectionClassName = sanitizeConnectionValue(self:resolveConnectionClassName(doorNodeRef))
+        connectionClassName = utils.sanitizeText(self:resolveConnectionClassName(doorNodeRef))
     end
     if connectionClassName == "" then
         connectionClassName = DEFAULT_DOOR_CONNECTION_CLASS
@@ -1103,9 +1848,9 @@ function device:addLiftFloorDoor(entry, doorType)
 
     local alreadyConnected = false
     for _, connection in ipairs(terminalSpawnable.deviceConnections) do
-        if sanitizeConnectionValue(connection.nodeRef) == doorNodeRef then
+        if utils.sanitizeText(connection.nodeRef) == doorNodeRef then
             alreadyConnected = true
-            if sanitizeConnectionValue(connection.deviceClassName) == "" then
+            if utils.sanitizeText(connection.deviceClassName) == "" then
                 connection.deviceClassName = connectionClassName
             end
             break
@@ -1146,11 +1891,11 @@ function device:updateLiftFloorDoorNodeRef(entry, doorEntry, newNodeRef)
         return
     end
 
-    local normalizedNodeRef = sanitizeConnectionValue(newNodeRef)
+    local normalizedNodeRef = utils.sanitizeText(newNodeRef)
     if normalizedNodeRef == "" then
         return
     end
-    local currentNodeRef = sanitizeConnectionValue(doorEntry.connection and doorEntry.connection.nodeRef or doorEntry.nodeRef or doorEntry.rawNodeRef or "")
+    local currentNodeRef = utils.sanitizeText(doorEntry.connection and doorEntry.connection.nodeRef or doorEntry.nodeRef or doorEntry.rawNodeRef or "")
     if normalizedNodeRef == currentNodeRef then
         return
     end
@@ -1175,12 +1920,12 @@ function device:updateLiftFloorDoorNodeRef(entry, doorEntry, newNodeRef)
 
     local connection = doorEntry.connection
     if not connection then
-        local className = sanitizeConnectionValue(doorEntry.doorClassName)
+        local className = utils.sanitizeText(doorEntry.doorClassName)
         if className == "" then
-            className = sanitizeConnectionValue(doorEntry.doorSpawnable and doorEntry.doorSpawnable.deviceClassName)
+            className = utils.sanitizeText(doorEntry.doorSpawnable and doorEntry.doorSpawnable.deviceClassName)
         end
         if className == "" then
-            className = sanitizeConnectionValue(self:resolveConnectionClassName(normalizedNodeRef))
+            className = utils.sanitizeText(self:resolveConnectionClassName(normalizedNodeRef))
         end
         if className == "" then
             className = DEFAULT_DOOR_CONNECTION_CLASS
@@ -1195,10 +1940,10 @@ function device:updateLiftFloorDoorNodeRef(entry, doorEntry, newNodeRef)
         doorEntry.connectionIndex = #terminalConnections
     else
         connection.nodeRef = normalizedNodeRef
-        if sanitizeConnectionValue(connection.deviceClassName) == "" then
-            local className = sanitizeConnectionValue(self:resolveConnectionClassName(normalizedNodeRef))
+        if utils.sanitizeText(connection.deviceClassName) == "" then
+            local className = utils.sanitizeText(self:resolveConnectionClassName(normalizedNodeRef))
             if className == "" then
-                className = sanitizeConnectionValue(doorEntry.doorClassName)
+                className = utils.sanitizeText(doorEntry.doorClassName)
             end
             if className == "" then
                 className = DEFAULT_DOOR_CONNECTION_CLASS
@@ -1213,10 +1958,7 @@ function device:updateLiftFloorDoorNodeRef(entry, doorEntry, newNodeRef)
     doorEntry.nodeRef = normalizedNodeRef
     doorEntry.rawNodeRef = normalizedNodeRef
 
-    registry.invalidate()
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
+    self:refreshNodeRefCaches()
 end
 
 ---@param entry table
@@ -1239,13 +1981,13 @@ function device:removeLiftFloorDoor(entry, doorEntry)
     local terminalConnections = entry.terminalSpawnable.deviceConnections or {}
     entry.terminalSpawnable.deviceConnections = terminalConnections
 
-    local targetNodeRef = sanitizeConnectionValue(doorEntry.connection and doorEntry.connection.nodeRef or doorEntry.nodeRef or doorEntry.rawNodeRef or "")
+    local targetNodeRef = utils.sanitizeText(doorEntry.connection and doorEntry.connection.nodeRef or doorEntry.nodeRef or doorEntry.rawNodeRef or "")
     local removedConnection = false
 
     for index = #terminalConnections, 1, -1 do
         local connection = terminalConnections[index]
         local sameConnection = doorEntry.connection and connection == doorEntry.connection
-        local sameNodeRef = targetNodeRef ~= "" and sanitizeConnectionValue(connection.nodeRef) == targetNodeRef
+        local sameNodeRef = targetNodeRef ~= "" and utils.sanitizeText(connection.nodeRef) == targetNodeRef
 
         if sameConnection or sameNodeRef then
             table.remove(terminalConnections, index)
@@ -1281,10 +2023,7 @@ function device:removeLiftFloorDoor(entry, doorEntry)
         history.addAction(actions[1])
     end
 
-    registry.invalidate()
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
+    self:refreshNodeRefCaches()
 end
 
 function device:addLiftFloor()
@@ -1296,7 +2035,7 @@ function device:addLiftFloor()
     local actions = {}
 
     if not utils.isA(parent, "positionableGroup") then
-        local wrappedParent, wrapAction = self:ensureLiftParentGroup()
+        local wrappedParent, wrapAction = self:ensureOwnParentGroup()
         if wrappedParent then
             parent = wrappedParent
         end
@@ -1482,7 +2221,7 @@ end
 function device:getSoundSystemComponentID()
     return self:getPersistentComponentID(
         self,
-        SOUND_SYSTEM_CONTROLLER_CLASS,
+        soundSystemData.SOUND_SYSTEM_CONTROLLER_CLASS,
         soundSystemData.SOUND_SYSTEM_COMPONENT_ID
     )
 end
@@ -1595,34 +2334,20 @@ end
 ---Speaker connections of this sound system, resolved to their spawnables where possible.
 ---@return table[]
 function device:getSpeakerEntries()
-    registry.update()
-
-    local entries = {}
-
-    for connectionIndex, connection in ipairs(self.deviceConnections) do
-        local className = sanitizeConnectionValue(connection.deviceClassName)
-        local rawNodeRef = sanitizeConnectionValue(connection.nodeRef)
-
-        if className == SPEAKER_CONTROLLER_CLASS and rawNodeRef ~= "" then
-            local speakerSpawnable, resolvedNodeRef = self:resolveConnectionTargetSpawnable(rawNodeRef)
-            local definition = speakerSpawnable
-                and soundSystemData.resolveSpeakerDefinition(speakerSpawnable.spawnData)
+    return self:getResolvedDeviceConnections(self, {
+        className = soundSystemData.SPEAKER_CONTROLLER_CLASS,
+        requireNodeRef = true,
+        decorate = function (entry)
+            local definition = entry.spawnable
+                and soundSystemData.resolveSpeakerDefinition(entry.spawnable.spawnData)
                 or nil
 
-            table.insert(entries, {
-                connection = connection,
-                connectionIndex = connectionIndex,
-                rawNodeRef = rawNodeRef,
-                nodeRef = resolvedNodeRef ~= "" and resolvedNodeRef or rawNodeRef,
-                speakerSpawnable = speakerSpawnable,
-                speakerElement = speakerSpawnable and speakerSpawnable.object or nil,
-                definition = definition,
-                label = definition and definition.label or "Speaker"
-            })
+            entry.speakerSpawnable = entry.spawnable
+            entry.speakerElement = entry.element
+            entry.definition = definition
+            entry.label = definition and definition.label or "Speaker"
         end
-    end
-
-    return entries
+    })
 end
 
 ---Connections on this sound system that point at something the game will not drive.
@@ -1631,28 +2356,15 @@ end
 ---a broken speaker and is worth saying out loud.
 ---@return { nodeRef: string, className: string, reason: string, element: element? }[]
 function device:getIgnoredSlaveConnections()
-    registry.update()
-
-    local ignored = {}
-
-    for _, connection in ipairs(self.deviceConnections) do
-        local className = sanitizeConnectionValue(connection.deviceClassName)
-        local rawNodeRef = sanitizeConnectionValue(connection.nodeRef)
-        local reason = className ~= "" and soundSystemData.getSlaveRejectionReason(className) or nil
-
-        if reason and rawNodeRef ~= "" then
-            local targetSpawnable, resolvedNodeRef = self:resolveConnectionTargetSpawnable(rawNodeRef)
-
-            table.insert(ignored, {
-                nodeRef = resolvedNodeRef ~= "" and resolvedNodeRef or rawNodeRef,
-                className = className,
-                reason = reason,
-                element = targetSpawnable and targetSpawnable.object or nil
-            })
+    return self:getResolvedDeviceConnections(self, {
+        requireNodeRef = true,
+        filter = function (_, className)
+            return soundSystemData.getSlaveRejectionReason(className) ~= nil
+        end,
+        decorate = function (entry)
+            entry.reason = soundSystemData.getSlaveRejectionReason(entry.className)
         end
-    end
-
-    return ignored
+    })
 end
 
 ---First free `<prefix>_<n>` name under `parent`. Used for both speakers and masters.
@@ -1695,16 +2407,9 @@ function device:addSpeaker(speakerType)
     end
 
     local actions = {}
-    local parent = self.object.parent
-
-    if not utils.isA(parent, "positionableGroup") then
-        local wrappedParent, wrapAction = self:ensureOwnParentGroup()
-        if wrappedParent then
-            parent = wrappedParent
-        end
-        if wrapAction then
-            table.insert(actions, wrapAction)
-        end
+    local parent, wrapAction = self:getQuickSetupChildParent()
+    if wrapAction then
+        table.insert(actions, wrapAction)
     end
 
     if not parent then
@@ -1715,49 +2420,27 @@ function device:addSpeaker(speakerType)
     local position = Vector4.new(self.position.x, self.position.y, self.position.z, 0)
     local rotation = EulerAngles.new(self.rotation.roll, self.rotation.pitch, self.rotation.yaw)
 
-    local speakerSeed = device:new()
-    speakerSeed:loadSpawnData({
+    local speakerElement, speakerSpawnable = self:createChildDeviceNode(parent, {
         spawnData = definition.spawnData,
         app = definition.defaultApp,
-        nodeRef = "",
-        persistent = false,
-        deviceClassName = SPEAKER_CONTROLLER_CLASS,
-        deviceConnections = {},
-        instanceDataChanges = {},
-        defaultComponentData = {}
-    }, position, rotation)
-
-    local speakerElement = spawnableElement:new(self.object.sUI)
-    speakerElement:load({
-        name = self:getNextChildName(parent, definition.namePrefix),
-        spawnable = speakerSeed:save(),
-        modulePath = "modules/classes/editor/spawnableElement"
+        controllerClass = soundSystemData.SPEAKER_CONTROLLER_CLASS,
+        namePrefix = definition.namePrefix,
+        position = position,
+        rotation = rotation
     })
-    speakerElement:setParent(parent)
-    parent.headerOpen = true
-
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
+    if not speakerElement or not speakerSpawnable then
+        return
     end
-    registry.invalidate()
-
-    local speakerSpawnable = speakerElement.spawnable
-    speakerSpawnable.nodeRef = registry.generate(speakerElement)
-    speakerSpawnable.deviceClassName = SPEAKER_CONTROLLER_CLASS
-    registry.invalidate()
 
     table.insert(actions, history.getElementChange(self.object))
     table.insert(self.deviceConnections, {
-        deviceClassName = SPEAKER_CONTROLLER_CLASS,
-        nodeRef = sanitizeConnectionValue(speakerSpawnable.nodeRef)
+        deviceClassName = soundSystemData.SPEAKER_CONTROLLER_CLASS,
+        nodeRef = utils.sanitizeText(speakerSpawnable.nodeRef)
     })
 
     table.insert(actions, history.getInsert({ speakerElement }))
 
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
-    registry.invalidate()
+    self:refreshNodeRefCaches()
 
     if #actions > 1 then
         history.addAction(history.getComposite(actions))
@@ -1774,45 +2457,46 @@ function device:updateSpeakerNodeRef(speakerEntry, newNodeRef)
         return
     end
 
-    local normalizedNodeRef = sanitizeConnectionValue(newNodeRef)
+    local normalizedNodeRef = utils.sanitizeText(newNodeRef)
     if normalizedNodeRef == "" then
         return
     end
 
-    local currentNodeRef = sanitizeConnectionValue(
-        speakerEntry.connection and speakerEntry.connection.nodeRef
-        or speakerEntry.nodeRef
-        or speakerEntry.rawNodeRef
-        or ""
-    )
-    if normalizedNodeRef == currentNodeRef then
+    local connectionNodeRef = utils.sanitizeText(speakerEntry.connection and speakerEntry.connection.nodeRef or "")
+    local currentNodeRef = utils.sanitizeText(speakerEntry.nodeRef or speakerEntry.rawNodeRef or "")
+    local needsReferrerRewrite = connectionNodeRef ~= "" and currentNodeRef ~= "" and connectionNodeRef ~= currentNodeRef
+
+    if normalizedNodeRef == currentNodeRef and not needsReferrerRewrite then
         return
     end
 
-    local changes = { history.getElementChange(self.object) }
-    if speakerEntry.speakerElement then
-        table.insert(changes, history.getElementChange(speakerEntry.speakerElement))
+    if not speakerEntry.speakerSpawnable then
+        history.addAction(history.getElementChange(self.object))
+
+        if speakerEntry.connection then
+            speakerEntry.connection.nodeRef = normalizedNodeRef
+        end
+
+        speakerEntry.nodeRef = normalizedNodeRef
+        speakerEntry.rawNodeRef = normalizedNodeRef
+        self:refreshNodeRefCaches()
+
+        return
     end
 
-    if #changes > 1 then
-        history.addAction(history.getComposite(changes))
-    else
-        history.addAction(changes[1])
-    end
+    self:updateNodeRefAndReferrers(speakerEntry.speakerSpawnable, speakerEntry.speakerElement, normalizedNodeRef, {
+        currentNodeRef = currentNodeRef,
+        includeOwnerChange = true,
+        rewriteReferrersOnSameValue = needsReferrerRewrite,
+        onUpdated = function (updatedNodeRef)
+            if speakerEntry.connection then
+                speakerEntry.connection.nodeRef = updatedNodeRef
+            end
 
-    if speakerEntry.connection then
-        speakerEntry.connection.nodeRef = normalizedNodeRef
-    end
-    if speakerEntry.speakerSpawnable then
-        speakerEntry.speakerSpawnable.nodeRef = normalizedNodeRef
-    end
-    speakerEntry.nodeRef = normalizedNodeRef
-    speakerEntry.rawNodeRef = normalizedNodeRef
-
-    registry.invalidate()
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
+            speakerEntry.nodeRef = updatedNodeRef
+            speakerEntry.rawNodeRef = updatedNodeRef
+        end
+    })
 end
 
 ---@param speakerEntry table
@@ -1831,7 +2515,7 @@ function device:removeSpeaker(speakerEntry)
         return
     end
 
-    local targetNodeRef = sanitizeConnectionValue(
+    local targetNodeRef = utils.sanitizeText(
         speakerEntry.connection and speakerEntry.connection.nodeRef
         or speakerEntry.nodeRef
         or speakerEntry.rawNodeRef
@@ -1842,7 +2526,7 @@ function device:removeSpeaker(speakerEntry)
     for index = #self.deviceConnections, 1, -1 do
         local connection = self.deviceConnections[index]
         local sameConnection = speakerEntry.connection and connection == speakerEntry.connection
-        local sameNodeRef = targetNodeRef ~= "" and sanitizeConnectionValue(connection.nodeRef) == targetNodeRef
+        local sameNodeRef = targetNodeRef ~= "" and utils.sanitizeText(connection.nodeRef) == targetNodeRef
 
         if sameConnection or sameNodeRef then
             self.connectionNodeRefSearch[tostring(connection)] = nil
@@ -1875,10 +2559,7 @@ function device:removeSpeaker(speakerEntry)
         history.addAction(actions[1])
     end
 
-    registry.invalidate()
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
+    self:refreshNodeRefCaches()
 end
 
 ---@param speakerSpawnable entity
@@ -1890,7 +2571,7 @@ function device:getSpeakerSetup(speakerSpawnable)
 
     local componentID = self:getPersistentComponentID(
         speakerSpawnable,
-        SPEAKER_CONTROLLER_CLASS,
+        soundSystemData.SPEAKER_CONTROLLER_CLASS,
         soundSystemData.SPEAKER_COMPONENT_ID
     )
     if not componentID then
@@ -1924,7 +2605,7 @@ end
 ---rather than a read of `self.deviceConnections`.
 ---@return table[]
 function device:getSoundSystemMasters()
-    local ownNodeRef = sanitizeConnectionValue(self.nodeRef)
+    local ownNodeRef = utils.sanitizeText(self.nodeRef)
     if ownNodeRef == "" or not self.object or not self.object.getRootParent then
         return {}
     end
@@ -1943,10 +2624,10 @@ function device:getSoundSystemMasters()
 
         if spawnable and spawnable ~= self and type(spawnable.deviceConnections) == "table" then
             for connectionIndex, connection in ipairs(spawnable.deviceConnections) do
-                local className = sanitizeConnectionValue(connection.deviceClassName)
-                local targetNodeRef = sanitizeConnectionValue(connection.nodeRef)
+                local className = utils.sanitizeText(connection.deviceClassName)
+                local targetNodeRef = utils.sanitizeText(connection.nodeRef)
 
-                if className == SOUND_SYSTEM_CONTROLLER_CLASS
+                if className == soundSystemData.SOUND_SYSTEM_CONTROLLER_CLASS
                     and targetNodeRef ~= ""
                     and (targetNodeRef == ownNodeRef or utils.nodeRefStringToHashString(targetNodeRef) == ownHash) then
                     local definition = soundSystemData.resolveMasterDefinition(spawnable.spawnData)
@@ -1954,11 +2635,11 @@ function device:getSoundSystemMasters()
                     table.insert(entries, {
                         connection = connection,
                         connectionIndex = connectionIndex,
-                        nodeRef = sanitizeConnectionValue(spawnable.nodeRef),
+                        nodeRef = utils.sanitizeText(spawnable.nodeRef),
                         masterSpawnable = spawnable,
                         masterElement = ref,
                         definition = definition,
-                        label = definition and definition.label or sanitizeConnectionValue(spawnable.deviceClassName),
+                        label = definition and definition.label or utils.sanitizeText(spawnable.deviceClassName),
                         isComputer = definition and definition.isComputer == true
                     })
 
@@ -1980,29 +2661,16 @@ function device:updateSoundSystemMasterNodeRef(masterEntry, newNodeRef)
         return
     end
 
-    local normalizedNodeRef = sanitizeConnectionValue(newNodeRef)
-    if normalizedNodeRef == "" then
-        return
-    end
+    self:updateNodeRefAndReferrers(masterEntry.masterSpawnable, masterEntry.masterElement, newNodeRef, {
+        updateReferrers = false,
+        onUpdated = function (updatedNodeRef)
+            masterEntry.nodeRef = updatedNodeRef
 
-    local currentNodeRef = sanitizeConnectionValue(masterEntry.masterSpawnable.nodeRef)
-    if normalizedNodeRef == currentNodeRef then
-        return
-    end
-
-    history.addAction(history.getElementChange(masterEntry.masterElement or self.object))
-
-    masterEntry.masterSpawnable.nodeRef = normalizedNodeRef
-    masterEntry.nodeRef = normalizedNodeRef
-
-    if self.soundSystemSelection and self.soundSystemSelection.kind == "master" then
-        self.soundSystemSelection = { kind = "master", key = "nodeRef:" .. normalizedNodeRef }
-    end
-
-    registry.invalidate()
-    if self.object and self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
+            if self.soundSystemSelection and self.soundSystemSelection.kind == "master" then
+                self.soundSystemSelection = { kind = "master", key = "nodeRef:" .. updatedNodeRef }
+            end
+        end
+    })
 end
 
 ---@param masterEntry table
@@ -2028,22 +2696,15 @@ function device:addSoundSystemMaster(masterType)
     end
 
     -- The connection is stored on the master and points here, so this system needs a NodeRef first.
-    local ownNodeRef = sanitizeConnectionValue(self.nodeRef)
+    local ownNodeRef = utils.sanitizeText(self.nodeRef)
     if ownNodeRef == "" then
         return
     end
 
     local actions = {}
-    local parent = self.object.parent
-
-    if not utils.isA(parent, "positionableGroup") then
-        local wrappedParent, wrapAction = self:ensureOwnParentGroup()
-        if wrappedParent then
-            parent = wrappedParent
-        end
-        if wrapAction then
-            table.insert(actions, wrapAction)
-        end
+    local parent, wrapAction = self:getQuickSetupChildParent()
+    if wrapAction then
+        table.insert(actions, wrapAction)
     end
 
     if not parent then
@@ -2053,43 +2714,24 @@ function device:addSoundSystemMaster(masterType)
     local position = Vector4.new(self.position.x, self.position.y, self.position.z, 0)
     local rotation = EulerAngles.new(self.rotation.roll, self.rotation.pitch, self.rotation.yaw)
 
-    local masterSeed = device:new()
-    masterSeed:loadSpawnData({
+    local masterElement, masterSpawnable = self:createChildDeviceNode(parent, {
         spawnData = definition.spawnData,
         app = definition.defaultApp,
-        nodeRef = "",
+        controllerClass = definition.controllerClass,
+        namePrefix = definition.namePrefix,
+        position = position,
+        rotation = rotation,
         persistent = true,
-        deviceClassName = definition.controllerClass,
-        deviceConnections = {},
-        instanceDataChanges = {},
-        defaultComponentData = {}
-    }, position, rotation)
-
-    local masterElement = spawnableElement:new(self.object.sUI)
-    masterElement:load({
-        name = self:getNextChildName(parent, definition.namePrefix),
-        spawnable = masterSeed:save(),
-        modulePath = "modules/classes/editor/spawnableElement"
-    })
-    masterElement:setParent(parent)
-    parent.headerOpen = true
-
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
-    registry.invalidate()
-
-    local masterSpawnable = masterElement.spawnable
-    masterSpawnable.nodeRef = registry.generate(masterElement)
-    masterSpawnable.deviceClassName = definition.controllerClass
-    masterSpawnable.persistent = true
-    masterSpawnable.deviceConnections = {
-        {
-            deviceClassName = SOUND_SYSTEM_CONTROLLER_CLASS,
-            nodeRef = ownNodeRef
+        deviceConnections = {
+            {
+                deviceClassName = soundSystemData.SOUND_SYSTEM_CONTROLLER_CLASS,
+                nodeRef = ownNodeRef
+            }
         }
-    }
-    registry.invalidate()
+    })
+    if not masterElement or not masterSpawnable then
+        return
+    end
 
     if definition.isComputer then
         self:applyComputerTerminalPreset(masterSpawnable)
@@ -2097,10 +2739,7 @@ function device:addSoundSystemMaster(masterType)
 
     table.insert(actions, history.getInsert({ masterElement }))
 
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
-    registry.invalidate()
+    self:refreshNodeRefCaches()
 
     if #actions > 1 then
         history.addAction(history.getComposite(actions))
@@ -2119,10 +2758,7 @@ function device:removeSoundSystemMaster(masterEntry)
     masterEntry.masterElement:remove()
     history.addAction(removeAction)
 
-    registry.invalidate()
-    if self.object.sUI and self.object.sUI.cachePaths then
-        self.object.sUI.cachePaths()
-    end
+    self:refreshNodeRefCaches()
 end
 
 ---@param masterSpawnable entity
@@ -2213,35 +2849,21 @@ function device:applyComputerTerminalPreset(masterSpawnable)
     end
 end
 
-quickElevatorSetupUI.install(device, {
-    liftControllerClass = LIFT_CONTROLLER_CLASS,
-    elevatorFloorControllerClass = ELEVATOR_FLOOR_CONTROLLER_CLASS,
-    elevatorFloorTerminalComponentID = ELEVATOR_FLOOR_TERMINAL_COMPONENT_ID,
-    sanitizeConnectionValue = sanitizeConnectionValue,
-    boolToInt = boolToInt
-})
+quickElevatorSetupUI.install(device)
 
--- The class names live on the device methods, not in the popup, so only the two shared helpers
--- need passing across.
-quickSoundSystemSetupUI.install(device, {
-    sanitizeConnectionValue = sanitizeConnectionValue,
-    boolToInt = boolToInt
-})
+quickSoundSystemSetupUI.install(device)
 
 -- Not gated on a specific controller class: any device whose PS derives from
 -- `ScriptableDeviceComponentPS` carries a `deviceOperationsSetup`, which is most of them.
-quickDeviceOperationsSetupUI.install(device, {
-    sanitizeConnectionValue = sanitizeConnectionValue,
-    boolToInt = boolToInt
-})
+quickDeviceOperationsSetupUI.install(device)
 
 -- Gated on the entity carrying a `gameTransformAnimatorComponent`, never on a device class: some
 -- TRANSFORM doors ship without one (`q113_sliding_wall.ent`), and instance data overrides existing
 -- components only, so the panel would have nothing to write to.
-quickTransformAnimationSetupUI.install(device, {
-    sanitizeConnectionValue = sanitizeConnectionValue,
-    boolToInt = boolToInt
-})
+quickTransformAnimationSetupUI.install(device)
+
+-- Quick Security opens from either a system or one of its areas.
+quickSecuritySetupUI.install(device)
 
 function device:draw()
     self:drawEntityBaseProperties()
@@ -2258,7 +2880,7 @@ function device:draw()
         self:drawLiftSetupPopup()
     end
 
-    if self.deviceClassName == SOUND_SYSTEM_CONTROLLER_CLASS then
+    if self.deviceClassName == soundSystemData.SOUND_SYSTEM_CONTROLLER_CLASS then
         if ImGui.Button("Quick Sound System Setup##openSoundSystemSetupPopup") then
             ImGui.OpenPopup(quickSoundSystemSetupUI.POPUP_ID)
         end
@@ -2266,7 +2888,15 @@ function device:draw()
         self:drawSoundSystemSetupPopup()
     end
 
-    if deviceOperationsData.supportsDeviceOperations(self.deviceClassName) then
+    if securitySystemData.supportsSecuritySetup(self.deviceClassName) then
+        if ImGui.Button("Quick Security System Setup##openSecuritySetupPopup") then
+            ImGui.OpenPopup(quickSecuritySetupUI.POPUP_ID)
+        end
+        style.tooltip("Faction, area types, access levels, event filters and minimap policy for this security network.")
+        self:drawSecuritySetupPopup()
+    end
+
+    if deviceOperationsData.classDerivesFrom(self.deviceClassName, deviceOperationsData.BASE_PS_CLASS) then
         if ImGui.Button("Device Operations##openDeviceOperationsPopup") then
             ImGui.OpenPopup(quickDeviceOperationsSetupUI.POPUP_ID)
         end
@@ -2306,15 +2936,15 @@ function device:draw()
         for index, connection in ipairs(self.deviceConnections) do
             ImGui.PushID(index)
 
-            connection.deviceClassName = sanitizeConnectionValue(connection.deviceClassName)
-            connection.nodeRef = sanitizeConnectionValue(connection.nodeRef)
+            connection.deviceClassName = utils.sanitizeText(connection.deviceClassName)
+            connection.nodeRef = utils.sanitizeText(connection.nodeRef)
 
             connection.deviceClassName, _, _ = style.trackedTextField(self.object, "##className", connection.deviceClassName, "gameDeviceComponentPS", 150)
             style.tooltip("Device class name of the connected device. Name of the gameDeviceComponentPS used in the devices gameDeviceComponent")
 
             ImGui.SameLine()
             local searchKey = tostring(connection)
-            local searchValue = sanitizeConnectionValue(self.connectionNodeRefSearch[searchKey] or "")
+            local searchValue = utils.sanitizeText(self.connectionNodeRefSearch[searchKey] or "")
             local nodeRefOptions = self:getConnectionNodeRefOptions(connection.nodeRef)
             local nodeRefChanged
             connection.nodeRef, searchValue, nodeRefChanged = style.trackedSearchDropdown(
@@ -2331,7 +2961,7 @@ function device:draw()
                     tooltip = "NodeRef of the connected device. Select one from this root group, or type and choose 'Use custom: ...'."
                 }
             )
-            connection.nodeRef = sanitizeConnectionValue(connection.nodeRef)
+            connection.nodeRef = utils.sanitizeText(connection.nodeRef)
             self.connectionNodeRefSearch[searchKey] = searchValue
             if nodeRefChanged then
                 local resolvedClassName = self:resolveConnectionClassName(connection.nodeRef)
@@ -2397,12 +3027,12 @@ function device:getProperties()
                 style.tooltip("Draw numbered door helper markers around the lift.")
             end
 
-            if self.deviceClassName == SOUND_SYSTEM_CONTROLLER_CLASS then
+            if self.deviceClassName == soundSystemData.SOUND_SYSTEM_CONTROLLER_CLASS then
                 style.mutedText("Show speaker helper")
                 ImGui.SameLine()
                 self.showSpeakerHelper, _ = style.toggleButton(IconGlyphs.Speaker, self.showSpeakerHelper)
                 style.tooltip("Draw a link line and numbered badge for each connected speaker.\nEach speaker's audible range follows that speaker's own range toggle.")
-            elseif self.deviceClassName == SPEAKER_CONTROLLER_CLASS then
+            elseif self.deviceClassName == soundSystemData.SPEAKER_CONTROLLER_CLASS then
                 -- One toggle for one thing: the sphere in the world and the ring on screen are two
                 -- renderings of the same audible radius, so they switch together.
                 style.mutedText("Show range")

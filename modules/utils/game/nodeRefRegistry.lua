@@ -190,6 +190,19 @@ function registry.generate(object)
     return generated
 end
 
+---@param query string
+---@param candidate string
+---@return boolean
+local function nodeRefMatchesSearch(query, candidate)
+    if query == "" or query == "0" then
+        return true
+    end
+
+    local ok, matched = pcall(string.match, candidate, query)
+
+    return ok and matched ~= nil
+end
+
 ---Draw a combo-based NodeRef picker with inline text search/filter.
 ---Search uses Lua pattern matching (`string.match`) against indexed refs.
 ---Special case: entering `"0"` shows all refs from the current root group.
@@ -197,18 +210,45 @@ end
 ---@param ref string Current NodeRef value and search text.
 ---@param object positionable Context object used for root scoping and self-ref exclusion.
 ---@param record boolean? When true, push a history action before user-driven changes (selection/clear).
----@param excluded table<string, boolean>? Refs hidden from the list, e.g. the ones already picked by sibling rows.
+---@param excluded table<string, boolean>|table? Refs hidden from the list, or selector options.
 ---@return string ref Updated NodeRef/search value.
 ---@return boolean finished True when user commits a value (selects, clears, or finishes text edit).
 function registry.drawNodeRefSelector(width, ref, object, record, excluded)
     local finished = false
     ref = registry.resolveDisplayRef(object, ref)
-    excluded = excluded or {}
+    local selectorOptions = {}
+
+    if type(excluded) == "table" and (
+        excluded.excluded ~= nil
+        or excluded.filter ~= nil
+        or excluded.modulePath ~= nil
+        or excluded.allowCustom ~= nil
+        or excluded.hint ~= nil
+        or excluded.id ~= nil
+        or excluded.emptyListText ~= nil
+        or excluded.tooltip ~= nil
+        or excluded.optionDisplayFn ~= nil
+        or excluded.optionTooltipFn ~= nil
+        or excluded.optionAnnotationFn ~= nil
+    ) then
+        selectorOptions = excluded
+        excluded = selectorOptions.excluded or {}
+    else
+        excluded = excluded or {}
+    end
+
+    local pickerId = selectorOptions.id or "##nodeRefSelector"
+    local searchId = selectorOptions.searchId or (pickerId .. "Search")
+    local listId = selectorOptions.listId or (pickerId .. "List")
+    local hint = selectorOptions.hint or "$/#foobar"
+    local listHeight = tonumber(selectorOptions.listHeight) or 100
+    local allowCustom = selectorOptions.allowCustom ~= false
 
     ImGui.SetNextItemWidth(width * style.viewSize)
-    if (ImGui.BeginCombo("##nodeRefSelector", ref)) then
+    if (ImGui.BeginCombo(pickerId, ref)) then
         local interiorWidth = width - (2 * ImGui.GetStyle().FramePadding.x) - 30
-        ref, _, textFieldFinished = style.trackedTextField(object, "##noderef", ref, "$/#foobar", interiorWidth)
+        local textFieldFinished
+        ref, _, textFieldFinished = style.trackedTextField(object, searchId, ref, hint, interiorWidth)
         local x, _ = ImGui.GetItemRectSize()
 
         ImGui.SameLine()
@@ -224,10 +264,39 @@ function registry.drawNodeRefSelector(width, ref, object, record, excluded)
 
         local entryHovered = false
         local xButton, _ = ImGui.GetItemRectSize()
-        if ImGui.BeginChild("##list", x + xButton + ImGui.GetStyle().ItemSpacing.x, 100 * style.viewSize) then
-            for _, node in pairs(registry.refs[object:getRootParent().name] or {}) do
-                -- Show everything when "0" is selected, treat it like a wildcard
-                if (ref == "0" or node.ref:match(ref)) and node.ref ~= object.spawnable.nodeRef and not excluded[node.ref] and ImGui.Selectable(utils.shortenPath(node.ref, ((width - 2 * ImGui.GetStyle().FramePadding.x) * style.viewSize) - (ImGui.GetScrollMaxY() > 0 and ImGui.GetStyle().ScrollbarSize or 0), false)) then
+        if ImGui.BeginChild(listId, x + xButton + ImGui.GetStyle().ItemSpacing.x, listHeight * style.viewSize) then
+            local root = object and object.getRootParent and object:getRootParent() or nil
+            local ownRef = object and object.spawnable and object.spawnable.nodeRef or nil
+            local nodes = {}
+
+            for _, node in pairs(root and registry.refs[root.name] or {}) do
+                local keep = node.ref ~= ownRef and not excluded[node.ref]
+
+                if keep and selectorOptions.modulePath then
+                    keep = node.spawnable and node.spawnable.modulePath == selectorOptions.modulePath
+                end
+
+                if keep and selectorOptions.filter then
+                    keep = selectorOptions.filter(node.spawnable, node.ref, node) == true
+                end
+
+                if keep and nodeRefMatchesSearch(ref, node.ref) then
+                    table.insert(nodes, node)
+                end
+            end
+
+            table.sort(nodes, function (left, right)
+                return tostring(left.ref) < tostring(right.ref)
+            end)
+
+            local rowWidth = ((width - 2 * ImGui.GetStyle().FramePadding.x) * style.viewSize)
+                - (ImGui.GetScrollMaxY() > 0 and ImGui.GetStyle().ScrollbarSize or 0)
+
+            for _, node in ipairs(nodes) do
+                local label = selectorOptions.optionDisplayFn and selectorOptions.optionDisplayFn(node.ref, node) or nil
+                label = label or utils.shortenPath(node.ref, rowWidth, false)
+
+                if ImGui.Selectable(label, false) then
                     if record then
                         history.addAction(history.getElementChange(object))
                     end
@@ -235,7 +304,27 @@ function registry.drawNodeRefSelector(width, ref, object, record, excluded)
                     finished = true
                     ImGui.CloseCurrentPopup()
                 end
+
+                if selectorOptions.optionAnnotationFn then
+                    local annotation = selectorOptions.optionAnnotationFn(node.ref, node)
+                    if annotation and annotation ~= "" then
+                        ImGui.SameLine()
+                        style.mutedText(annotation)
+                    end
+                end
+
+                if selectorOptions.optionTooltipFn then
+                    local tooltip = selectorOptions.optionTooltipFn(node.ref, node)
+                    if tooltip and tooltip ~= "" then
+                        style.tooltip(tooltip)
+                    end
+                end
+
                 entryHovered = entryHovered or ImGui.IsItemHovered()
+            end
+
+            if #nodes == 0 and selectorOptions.emptyListText then
+                style.mutedText(selectorOptions.emptyListText)
             end
 
             ImGui.EndChild()
@@ -247,8 +336,12 @@ function registry.drawNodeRefSelector(width, ref, object, record, excluded)
         if entryHovered and textFieldFinished then
             finished = false
         else
-            finished = finished or textFieldFinished
+            finished = finished or (allowCustom and textFieldFinished)
         end
+    end
+
+    if selectorOptions.tooltip then
+        style.tooltip(selectorOptions.tooltip)
     end
 
     return ref, finished

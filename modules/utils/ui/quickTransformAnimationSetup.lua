@@ -3,6 +3,7 @@ local utils = require("modules/utils/core/utils")
 local history = require("modules/utils/project/history")
 local registry = require("modules/utils/game/nodeRefRegistry")
 local red = require("modules/utils/interop/redConverter")
+local redValue = require("modules/utils/data/redValue")
 local data = require("modules/utils/data/transformAnimations")
 local animSets = require("modules/utils/data/doorAnimSets")
 local audioData = require("modules/utils/data/audioData")
@@ -31,13 +32,10 @@ local quickTransformAnimationSetupUI = {
 }
 
 ---@param device table
----@param options table?
-function quickTransformAnimationSetupUI.install(device, options)
+function quickTransformAnimationSetupUI.install(device)
     if not device then
         return
     end
-
-    options = options or {}
 
     ---@param tbl table?
     ---@param path table
@@ -155,7 +153,7 @@ function quickTransformAnimationSetupUI.install(device, options)
             local selector = kind and audioData.getFieldSelector(kind) or nil
 
             if selector then
-                local currentName = data.readCName(current)
+                local currentName = redValue.readCName(current)
                 local searchKey = fieldScope .. "/" .. table.concat(field.path, "/")
 
                 local newValue, finished
@@ -204,28 +202,28 @@ function quickTransformAnimationSetupUI.install(device, options)
                 end
 
                 if finished and newValue ~= currentName then
-                    writePath(owner, field.path, data.cname(newValue))
+                    writePath(owner, field.path, redValue.cName(newValue))
                     changed, settled = true, true
                 end
             else
                 local newValue, _, finished = style.trackedTextField(
-                    self.object, "##field", data.readCName(current), "Name...", width
+                    self.object, "##field", redValue.readCName(current), "Name...", width
                 )
                 if finished then
-                    writePath(owner, field.path, data.cname(newValue))
+                    writePath(owner, field.path, redValue.cName(newValue))
                     changed, settled = true, true
                 end
             end
 
         elseif field.kind == "noderef" then
-            local newValue, finished = registry.drawNodeRefSelector(width, data.readRawValue(current), self.object, false)
+            local newValue, finished = registry.drawNodeRefSelector(width, redValue.readRawValue(current), self.object, false)
             if finished then
-                writePath(owner, field.path, data.nodeRef(newValue))
+                writePath(owner, field.path, redValue.nodeRef(newValue))
                 changed, settled = true, true
             end
 
         elseif field.kind == "bool" then
-            local newValue, didChange = style.trackedCheckbox(self.object, "##field", data.readBool(current))
+            local newValue, didChange = style.trackedCheckbox(self.object, "##field", redValue.readBool(current))
             if didChange then
                 writePath(owner, field.path, newValue and 1 or 0)
                 changed, settled = true, true
@@ -281,7 +279,7 @@ function quickTransformAnimationSetupUI.install(device, options)
             end
 
             if anyChanged then
-                writePath(owner, field.path, data.vector3(values[1], values[2], values[3]))
+                writePath(owner, field.path, redValue.vector3(values[1], values[2], values[3]))
                 changed, settled = true, anyFinished
             end
 
@@ -471,12 +469,6 @@ function quickTransformAnimationSetupUI.install(device, options)
         self.transformAnimatorComponentID = componentID
 
         return componentID
-    end
-
-    ---@param componentID string
-    ---@return table[]
-    function device:getTransformAnimationList(componentID)
-        return self:getComponentPathArray(self, componentID, data.ANIMATIONS_PATH)
     end
 
     ---The animator on the spawned entity, found by class rather than by name: a device can carry
@@ -1287,7 +1279,7 @@ function quickTransformAnimationSetupUI.install(device, options)
             return
         end
 
-        local animations = self:getTransformAnimationList(componentID)
+        local animations = self:getComponentPathArray(self, componentID, data.ANIMATIONS_PATH)
 
         local _, availableY = ImGui.GetContentRegionAvail()
         local footerHeight = ImGui.GetFrameHeightWithSpacing() + 14 * style.viewSize

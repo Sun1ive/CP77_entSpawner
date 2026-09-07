@@ -3,6 +3,7 @@ local style = require("modules/ui/style")
 local utils = require("modules/utils/core/utils")
 local logger = require("modules/utils/core/logger")
 local element = require("modules/classes/editor/element")
+local outlineConsumer = require("modules/utils/game/outlineConsumer")
 
 ---Class for worldAreaShapeNode
 ---@class area : visualized
@@ -12,82 +13,17 @@ local element = require("modules/classes/editor/element")
 ---@field protected maxPropertyWidth number
 local area = setmetatable({}, { __index = visualized })
 
----Areas that consume an outline, bucketed by the outline group path they reference, per root element.
----Outline markers notify on every transform change, so this avoids walking the hierarchy per frame
----while one is being dragged. Stamped with the hierarchy cache epoch, like the other path caches.
-local outlineConsumerCache = setmetatable({}, { __mode = "k" })
-
----Which outline an area references is not part of the hierarchy, so picking a different one has to
----invalidate the buckets explicitly.
-local outlineConsumerEpoch = 0
+---Compatibility wrappers for the shared outline consumer helper.
 
 function area.invalidateOutlineConsumers()
-    outlineConsumerEpoch = outlineConsumerEpoch + 1
+    outlineConsumer.invalidate()
 end
 
----@param root element
----@param sUI table
----@return table<string, table[]>
-local function getOutlineConsumers(root, sUI)
-    if sUI.ensureCache then
-        sUI.ensureCache()
-    end
-
-    local stamp = string.format("%s:%s", tostring(sUI.cacheEpoch or 0), tostring(outlineConsumerEpoch))
-    local cached = outlineConsumerCache[root]
-
-    if cached and cached.stamp == stamp then
-        return cached.byPath
-    end
-
-    local byPath = {}
-
-    for _, entry in pairs(sUI.paths or {}) do
-        local ref = entry.ref
-        local spawnable = ref and utils.isA(ref, "spawnableElement") and ref.spawnable or nil
-
-        if spawnable and spawnable.onOutlineChanged and spawnable.outlinePath and spawnable.outlinePath ~= "" then
-            if ref.getRootParent and ref:getRootParent() == root then
-                local bucket = byPath[spawnable.outlinePath]
-
-                if not bucket then
-                    bucket = {}
-                    byPath[spawnable.outlinePath] = bucket
-                end
-
-                table.insert(bucket, spawnable)
-            end
-        end
-    end
-
-    outlineConsumerCache[root] = { stamp = stamp, byPath = byPath }
-
-    return byPath
-end
-
----Notifies every area referencing an outline group that its geometry changed.
----
----Outline markers are elements of their own, so an area has no way of noticing on its own that one of
----them moved, changed height, or joined/left the group.
+---Notifies every consumer referencing an outline group that its geometry changed.
 ---@param object element Element inside the outline group, usually an outline marker.
 ---@param parentOverride element? Group to notify for, when the marker just left or entered one.
 function area.notifyOutlineChanged(object, parentOverride)
-    if not object then return end
-
-    local parent = parentOverride or object.parent
-    local sUI = object.sUI
-
-    if not parent or not sUI or not parent.getPath then return end
-
-    local path = parent:getPath()
-    if not path or path == "" then return end
-
-    local root = object.getRootParent and object:getRootParent() or nil
-    if not root then return end
-
-    for _, spawnable in ipairs(getOutlineConsumers(root, sUI)[path] or {}) do
-        spawnable:onOutlineChanged()
-    end
+    outlineConsumer.notifyChanged(object, parentOverride)
 end
 
 function area:new()
@@ -142,36 +78,13 @@ function area:getTransformUIConfig()
     }
 end
 
----Called when the referenced outline changed: a different group got picked, or one of its markers
----moved, changed height, or joined/left the group.
+---Called when the referenced outline changes.
 ---@protected
 function area:onOutlineChanged()
 end
 
 function area:getMarkersData()
-    local markers = {}
-    local height = 0
-
-    local paths = self:loadOutlinePaths()
-
-    if utils.indexValue(paths, self.outlinePath) ~= -1 then
-        local sUI = self.object and self.object.sUI or nil
-        local outline = sUI and sUI.getElementByPath and sUI.getElementByPath(self.outlinePath) or nil
-
-        if outline and outline.childs then
-            for _, child in ipairs(outline.childs) do
-                local spawnable = child and child.spawnable or nil
-                if utils.isA(child, "spawnableElement") and spawnable and spawnable.modulePath == "area/outlineMarker" then
-                    if spawnable.position then
-                        table.insert(markers, utils.fromVector(spawnable.position))
-                    end
-                    height = tonumber(spawnable.height) or height
-                end
-            end
-        end
-    end
-
-    return markers, height
+    return outlineConsumer.getMarkers(self)
 end
 
 function area:save()
@@ -184,42 +97,7 @@ function area:save()
 end
 
 function area:loadOutlinePaths()
-    local paths = {}
-    local object = self.object
-    local sUI = object and object.sUI or nil
-    if not object or not sUI then
-        return paths
-    end
-
-    if sUI.ensureCache then
-        sUI.ensureCache()
-    end
-
-    local ownRoot = object.getRootParent and object:getRootParent() or nil
-    if not ownRoot then
-        return paths
-    end
-
-    for _, container in pairs(sUI.containerPaths or {}) do
-        if container and container.ref and container.ref.getRootParent and container.ref:getRootParent() == ownRoot then
-            local nMarkers = 0
-            for _, child in pairs(container.ref.childs or {}) do
-                local spawnable = child and child.spawnable or nil
-                if utils.isA(child, "spawnableElement") and spawnable and spawnable.modulePath == "area/outlineMarker" then
-                    nMarkers = nMarkers + 1
-                end
-
-                if nMarkers == 3 then
-                    if container.path and container.path ~= "" then
-                        table.insert(paths, container.path)
-                    end
-                    break
-                end
-            end
-        end
-    end
-
-    return paths
+    return outlineConsumer.loadPaths(self)
 end
 
 function area:getMarkersCenter()

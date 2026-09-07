@@ -1016,18 +1016,45 @@ function red.importAny(metaType, propType, value, prop, data, key)
     return propData
 end
 
+---Writes a RED JSON payload onto a live object.
+---
+---A key the target class does not carry is skipped with a warning rather than thrown. The payload is
+---authored against a class dump, and the live RTTI does not always carry every name in it -- but a
+---single unknown key used to abort the whole call, which meant one stray property silently discarded
+---every other override on the entity. Naming the class and the key turns that into a fixable report
+---instead of a node that quietly comes back wrong.
+---@param json table
+---@param data ISerializable
 function red.JSONToRedData(json, data)
     json["$type"] = nil
 
+    -- Resolved once: it is the same class for every key, and it was being looked up per property.
+    local class = Reflection.GetClassOf(ToVariant(data), true)
+
+    if not class then
+        logger:warn("[Red Converter] Target instance has no RTTI class, skipping its payload.")
+
+        return
+    end
+
     for key, value in pairs(json) do
-        local prop = Reflection.GetClassOf(ToVariant(data), true):GetProperty(key)
-        local propType = prop:GetType():GetName().value
-        local metaType = prop:GetType():GetMetaType()
+        local prop = class:GetProperty(key)
 
-        local propData = red.importAny(metaType, propType, value, prop, data, key)
+        if not prop then
+            logger:warn(string.format(
+                "[Red Converter] %s has no property \"%s\", skipped.",
+                tostring(class:GetName().value),
+                tostring(key)
+            ))
+        else
+            local propType = prop:GetType():GetName().value
+            local metaType = prop:GetType():GetMetaType()
 
-        if propData then
-            data[key] = propData
+            local propData = red.importAny(metaType, propType, value, prop, data, key)
+
+            if propData then
+                data[key] = propData
+            end
         end
     end
 end

@@ -199,17 +199,6 @@ function entity:new()
    	return o
 end
 
----Normalizes a device class name for lookup/caching (trim + strip non-ASCII).
----@type fun(value: any, fallback: any?): string
-local sanitizeDeviceClassName = utils.sanitizeText
-
----Public wrapper for device class normalization used across modules.
----@param value any
----@return string
-function entity.sanitizeDeviceClassName(value)
-    return sanitizeDeviceClassName(value)
-end
-
 ---Returns whether a spawn module can provide/resolve device class names.
 ---@param modulePath string?
 ---@return boolean
@@ -227,7 +216,7 @@ function entity.resolveDeviceClassNameForEntry(entry, modulePath)
         return ""
     end
 
-    local listClassName = entity.sanitizeDeviceClassName(entry.data and entry.data.deviceClassName or nil)
+    local listClassName = utils.sanitizeText(entry.data and entry.data.deviceClassName or nil)
     if listClassName ~= "" then
         return listClassName
     end
@@ -237,14 +226,14 @@ function entity.resolveDeviceClassNameForEntry(entry, modulePath)
         return ""
     end
 
-    return entity.sanitizeDeviceClassName(cache.getValue(spawnPath .. "_deviceClassName"))
+    return utils.sanitizeText(cache.getValue(spawnPath .. "_deviceClassName"))
 end
 
 ---Maps a device class name to the configured secondary icon glyph.
 ---@param className string?
 ---@return string
 function entity.getDeviceSecondaryIcon(className)
-    return deviceClassSecondaryIconByName[entity.sanitizeDeviceClassName(className)] or ""
+    return deviceClassSecondaryIconByName[utils.sanitizeText(className)] or ""
 end
 
 ---Resolves the secondary icon shown next to a spawn-list entry label.
@@ -262,7 +251,7 @@ function entity:updateDeviceSecondaryIcon()
 
     local cacheKey = (self.spawnData and self.spawnData ~= "") and (self.spawnData .. "_deviceClassName") or nil
     if cacheKey then
-        local currentClassName = entity.sanitizeDeviceClassName(self.deviceClassName)
+        local currentClassName = utils.sanitizeText(self.deviceClassName)
         local cachedClassName = cache.getValue(cacheKey)
 
         if currentClassName ~= "" and cachedClassName ~= currentClassName then
@@ -342,6 +331,50 @@ function entity:reloadAppearances()
     self:loadAppearanceData(true)
 end
 
+---Switches the entity to another of its loaded appearances.
+---
+---The single place an appearance change is applied, so every entry point -- the properties panel's
+---dropdown, the cycle button, the quick setup popups -- drops the cached component defaults and
+---respawns identically. `defaultComponentData` describes the components of the appearance being
+---left behind, so keeping it would have the instance data editor comparing new components against
+---an old baseline.
+---
+---Refuses an appearance that is not in the loaded list: the list is what `save`/`export` and the
+---appearance-driven UI read against, and a name outside it spawns as the entity's default while
+---every picker keeps claiming it is set.
+---@param app string
+---@param options table? `{ recordHistory boolean }` History is the caller's when the widget it came
+---from already tracks it, as the tracked dropdowns do.
+---@return boolean changed
+function entity:setAppearance(app, options)
+    options = options or {}
+
+    local newApp = tostring(app or "")
+    local index = utils.indexValue(self.apps or {}, newApp)
+
+    if newApp == "" or type(index) ~= "number" or index < 1 then
+        return false
+    end
+
+    if newApp == self.app then
+        return false
+    end
+
+    if options.recordHistory and self.object then
+        history.addAction(history.getElementChange(self.object))
+    end
+
+    self.app = newApp
+    self.appIndex = index - 1
+    self.defaultComponentData = {}
+
+    if self:getEntity() then
+        self:respawn()
+    end
+
+    return true
+end
+
 ---Selects the next appearance in the loaded list, wrapping at the end.
 ---@return boolean changed
 function entity:cycleAppearance()
@@ -356,31 +389,15 @@ function entity:cycleAppearance()
     end
 
     local nextIndex = (currentIndex % appCount) + 1
-    local nextApp = self.apps[nextIndex]
-    if not nextApp or nextApp == self.app then
-        return false
-    end
 
-    if self.object then
-        history.addAction(history.getElementChange(self.object))
-    end
-
-    self.app = nextApp
-    self.appIndex = nextIndex - 1
-    self.defaultComponentData = {}
-
-    if self:getEntity() then
-        self:respawn()
-    end
-
-    return true
+    return self:setAppearance(self.apps[nextIndex], { recordHistory = true })
 end
 
 function entity:loadSpawnData(data, position, rotation)
     spawnable.loadSpawnData(self, data, position, rotation)
     self.appSearch = self.appSearch or ""
     self.appSearch = utils.stripNonASCII(self.appSearch)
-    self.deviceClassName = sanitizeDeviceClassName(self.deviceClassName)
+    self.deviceClassName = utils.sanitizeText(self.deviceClassName)
     self:updateDeviceSecondaryIcon()
     self:loadAppearanceData(false)
 end
@@ -607,6 +624,8 @@ local function fixInstanceData(data, parent)
             end
         elseif key == "betterNetrunningBreachedCameras" or key == "betterNetrunningBreachedNPCs" or key == "betterNetrunningBreachedBasic" or key == "betterNetrunningBreachedTurrets" then
             data[key] = nil
+        elseif key == "buffer" and data["$type"] == "AreaShapeOutline" then
+            data[key] = nil
         elseif type(value) == "number" then
             data[key] = clampCustomNumericProperty(key, value)
         end
@@ -674,7 +693,7 @@ function entity:onAssemble(entRef)
     for _, component in pairs(entRef:GetComponents()) do
         if component:IsA("gameDeviceComponent") then
             if self.deviceClassName == "" and component.persistentState then
-                self.deviceClassName = sanitizeDeviceClassName(component.persistentState:GetClassName().value)
+                self.deviceClassName = utils.sanitizeText(component.persistentState:GetClassName().value)
             end
         end
 
@@ -1499,17 +1518,10 @@ function entity:drawEntityBaseProperties()
             matchContentWidth = true
         }
     )
-    if changed and #self.apps > 0 then
-        self.app = selectedApp
-        self.appIndex = math.max(utils.indexValue(self.apps, self.app) - 1, 0)
-
-        local entity = self:getEntity()
-
-        self.defaultComponentData = {}
-
-        if entity then
-            self:respawn()
-        end
+    if changed then
+        -- History is already on the stack: `trackedSearchDropdown` pushed it before reporting the
+        -- change.
+        self:setAppearance(selectedApp)
     end
     ImGui.SameLine()
     ImGui.BeginDisabled(greyOut)
