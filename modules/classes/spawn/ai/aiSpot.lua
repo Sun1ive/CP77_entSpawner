@@ -368,7 +368,6 @@ end
 ---@field isWorkspotStatic boolean
 ---@field markings table
 ---@field masterNodeRef string
----@field enabledWhenMasterOccupied boolean
 ---@field maxPropertyWidth number
 ---@field npcID entEntityID
 ---@field npcSpawning boolean
@@ -842,8 +841,6 @@ function aiSpot:new()
     o.isWorkspotStatic = false
     o.markings = {}
     o.masterNodeRef = ""
-    o.enabledWhenMasterOccupied = false
-    o.masterPropertyWidth = nil
 
     -- Synced-pair picker state. Transient: it follows the workspot, not the saved project.
     o.syncPartners = nil
@@ -911,7 +908,6 @@ function aiSpot:loadSpawnData(data, position, rotation)
     end
     self.workSequence.idleAnim = sanitizePreviewValue(self.workSequence.idleAnim, "")
     self.masterNodeRef = sanitizePreviewValue(self.masterNodeRef, "")
-    self.enabledWhenMasterOccupied = self.enabledWhenMasterOccupied == true
 end
 
 function aiSpot:getVisualizerSize()
@@ -1293,7 +1289,6 @@ function aiSpot:save()
     data.isWorkspotStatic = self.isWorkspotStatic
     data.markings = utils.deepcopy(self.markings)
     data.masterNodeRef = self.masterNodeRef
-    data.enabledWhenMasterOccupied = self.enabledWhenMasterOccupied
 
     return data
 end
@@ -1809,9 +1804,12 @@ end
 ---@param partner table Entry from `aiSpot:getSyncPartners`
 ---@param arrangement table One of `partner.arrangements`
 ---@param selfLeads boolean This spot is the master, the new one its child.
+---@param options table? `recordHistory = false` leaves the undo entry to the caller, for a caller
+---placing both halves at once.
 ---@return boolean success
 ---@return string status
-function aiSpot:spawnComplementarySpot(partner, arrangement, selfLeads)
+---@return spawnableElement? spawned
+function aiSpot:spawnComplementarySpot(partner, arrangement, selfLeads, options)
     local element = self.object
 
     if not element or not element.parent or not element.sUI then
@@ -1840,7 +1838,6 @@ function aiSpot:spawnComplementarySpot(partner, arrangement, selfLeads)
     spawnable.rotation = rotation
     spawnable.nodeRef = ""
     spawnable.masterNodeRef = selfLeads and self.nodeRef or ""
-    spawnable.enabledWhenMasterOccupied = false
     -- Markings bind a spot to a community time period, so copying them would bind the pair twice.
     spawnable.markings = {}
 
@@ -1865,13 +1862,15 @@ function aiSpot:spawnComplementarySpot(partner, arrangement, selfLeads)
         registry.invalidate()
         new.spawnable.nodeRef = registry.generate(new)
         self.masterNodeRef = new.spawnable.nodeRef
-        self.enabledWhenMasterOccupied = false
     end
 
     registry.invalidate()
-    history.addAction(history.getComposite({ changeAction, history.getInsert({ new }) }))
 
-    return true, string.format("Spawned %s", data.name)
+    if not options or options.recordHistory ~= false then
+        history.addAction(history.getComposite({ changeAction, history.getInsert({ new }) }))
+    end
+
+    return true, string.format("Spawned %s", data.name), new
 end
 
 function aiSpot:drawSyncedPair()
@@ -1879,7 +1878,7 @@ function aiSpot:drawSyncedPair()
     if #partners == 0 then return end
 
     local open = ImGui.TreeNodeEx("Synced Pair", ImGuiTreeNodeFlags.SpanFullWidth)
-    style.tooltip("This workspot is one half of a synced animation.\nSpawn the other half here to get it placed at the exact offset the animation was authored for.")
+    style.tooltip("This workspot is one half of a synced animation.\nSpawn the other half here to get it placed at the offset the pair is played at.")
     if not open then return end
 
     if not self.syncPropertyWidth then
@@ -1961,20 +1960,31 @@ function aiSpot:drawSyncedPair()
         self.syncMasterIsSelf = masterIndex == 0
     end
 
+    local placed = workspotSync.hasOffset(arrangement)
+
     style.mutedText(string.format("Offset  x %.2f  y %.2f  z %.2f  yaw %.1f°",
         arrangement.offset[1], arrangement.offset[2], arrangement.offset[3], arrangement.offset[4]))
     style.tooltip("Position and rotation of the complementary spot, in this spot's local space.")
 
-    if ImGui.Button("Spawn Complementary Spot") then
+    -- The pair is known, but neither the workspot nor any shipped placement of it says how the two
+    -- halves line up, so the second spot can only start out on top of this one.
+    if not placed then
+        style.styledText(IconGlyphs.AlertOutline, 0xFF2525E5)
+        ImGui.SameLine()
+        style.styledTextWrapped("No offset is known for this pair, the new spot lands on this one and has to be moved into place by hand.", style.warnColor)
+    end
+
+    if ImGui.Button(IconGlyphs.AccountMultiplePlusOutline .. " Spawn Complementary Spot") then
         local success, status = self:spawnComplementarySpot(partner, arrangement, self.syncMasterIsSelf)
         self.syncStatus = status
         if success then
             ImGui.ShowToast(ImGui.Toast.new(ImGui.ToastType.Success, 2500, status))
         end
     end
-    style.tooltip(self.syncMasterIsSelf
+    style.tooltip((self.syncMasterIsSelf
         and "Add the second spot of this pair next to this one, placed at the offset above and made\nthe child of this spot."
         or "Add the second spot of this pair next to this one, placed at the offset above, and make\nthis spot its child.")
+        .. (placed and "" or "\nIts placement is unknown, so it spawns on top of this spot."))
 
     if self.syncStatus ~= "" then
         style.mutedText(self.syncStatus)
@@ -1985,6 +1995,23 @@ end
 
 function aiSpot:draw()
     visualized.draw(self)
+
+    if ImGui.Button("Add To Community") then
+        self.communityAttachStatus = ""
+        self.communityAttachMarkingSearch = ""
+        -- The popup requires a NodeRef, so a spot that has none opens with a generated candidate
+        -- rather than with an empty required field. It only reaches self.nodeRef on apply.
+        self.communityAttachNodeRef = sanitizePreviewValue(self.nodeRef, "")
+        if self.communityAttachNodeRef == "" then
+            self.communityAttachNodeRef = registry.generate(self.object)
+        end
+        if sanitizePreviewValue(self.communityAttachMarking, "") == "" then
+            self.communityAttachMarking = sanitizePreviewValue(self.markings and self.markings[1], "")
+        end
+        ImGui.OpenPopup(COMMUNITY_ATTACH_POPUP_ID)
+    end
+    style.tooltip("Open a popup to add this workspot to a Community phase/time period.")
+    self:drawCommunityAttachPopup()
 
     if not self.maxPropertyWidth then
         self.maxPropertyWidth = utils.getTextMaxWidth({ "Visualize position", "Is Infinite", "Is Static", "Preview NPC", "NPC Record", "NPC Appearance", "Animation Speed"}) + 4 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
@@ -2177,52 +2204,17 @@ function aiSpot:draw()
 
     self:drawSyncedPair()
 
-    local masterOpen = ImGui.TreeNodeEx("Master Spot", ImGuiTreeNodeFlags.SpanFullWidth)
-    style.tooltip("Makes this spot the child of another one, which is how a synced workspot pairs two NPCs.\nUse the workspot pair that names one side master or npc1 and the other child or npc2, and point the child at the master.\nNothing is exported while no master spot is set.")
-    if masterOpen then
-        if not self.masterPropertyWidth then
-            self.masterPropertyWidth = utils.getTextMaxWidth({ "Master Spot", "Enabled While Occupied" }) + 2 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
-        end
-
-        style.mutedText("Master Spot")
-        ImGui.SameLine()
-        ImGui.SetCursorPosX(self.masterPropertyWidth)
-        self.masterNodeRef, _ = registry.drawNodeRefSelector(math.max(120, style.getMaxWidth(250) - 40), self.masterNodeRef, self.object, true, {
-            id = "##masterNodeRef",
-            modulePath = "ai/aiSpot",
-            hint = "$/#ai_spot",
-            listHeight = 140,
-            emptyListText = "No other AI Spot with a NodeRef in this project.",
-            tooltip = "The spot this one is the child of, used by synced workspots where two NPCs act together.\nOnly AI Spots that have a NodeRef are listed, a spot without one can not be referenced."
-        })
-
-        style.mutedText("Enabled While Occupied")
-        ImGui.SameLine()
-        ImGui.SetCursorPosX(self.masterPropertyWidth)
-        ImGui.BeginDisabled(self.masterNodeRef == "")
-        self.enabledWhenMasterOccupied, _ = style.trackedCheckbox(self.object, "##enabledWhenMasterOccupied", self.enabledWhenMasterOccupied)
-        ImGui.EndDisabled()
-        style.tooltip("If checked, this spot stays available to other NPCs while the master spot is taken.\nAlmost every shipped child spot leaves this off, so the pair is used by one NPC couple at a time.", ImGuiHoveredFlags.AllowWhenDisabled)
-
-        ImGui.TreePop()
-    end
-
-    if ImGui.Button("Add To Community") then
-        self.communityAttachStatus = ""
-        self.communityAttachMarkingSearch = ""
-        -- The popup requires a NodeRef, so a spot that has none opens with a generated candidate
-        -- rather than with an empty required field. It only reaches self.nodeRef on apply.
-        self.communityAttachNodeRef = sanitizePreviewValue(self.nodeRef, "")
-        if self.communityAttachNodeRef == "" then
-            self.communityAttachNodeRef = registry.generate(self.object)
-        end
-        if sanitizePreviewValue(self.communityAttachMarking, "") == "" then
-            self.communityAttachMarking = sanitizePreviewValue(self.markings and self.markings[1], "")
-        end
-        ImGui.OpenPopup(COMMUNITY_ATTACH_POPUP_ID)
-    end
-    style.tooltip("Open a popup to add this workspot to a Community phase/time period.")
-    self:drawCommunityAttachPopup()
+    style.mutedText("Master Spot")
+    ImGui.SameLine()
+    ImGui.SetCursorPosX(self.maxPropertyWidth)
+    self.masterNodeRef, _ = registry.drawNodeRefSelector(math.max(120, style.getMaxWidth(250) - 40), self.masterNodeRef, self.object, true, {
+        id = "##masterNodeRef",
+        modulePath = "ai/aiSpot",
+        hint = "$/#ai_spot",
+        listHeight = 140,
+        emptyListText = "No other AI Spot with a NodeRef in this project.",
+        tooltip = "Makes this spot the child of another one, which is how a synced workspot pairs two NPCs.\nOnly AI Spots that have a NodeRef are listed, a spot without one can not be referenced.\nThis spot is unavailable while its master is taken."
+    })
 
     if ImGui.TreeNodeEx("Markings", ImGuiTreeNodeFlags.SpanFullWidth) then
         for key, _ in pairs(self.markings) do
@@ -2326,7 +2318,8 @@ function aiSpot:export()
             ["$storage"] = "string",
             ["$value"] = self.masterNodeRef
         }
-        spot["enabledWhenMasterOccupied"] = self.enabledWhenMasterOccupied and 1 or 0
+        -- Shipped child spots are practically always unavailable while their master is taken.
+        spot["enabledWhenMasterOccupied"] = 0
     end
 
     local data = visualized.export(self)

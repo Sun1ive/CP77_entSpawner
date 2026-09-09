@@ -104,6 +104,20 @@ function workspotSync.getPartnerTransform(position, rotation, offset)
         { roll = rotated.roll, pitch = rotated.pitch, yaw = rotated.yaw }
 end
 
+---Whether an arrangement says where the partner goes. A zero offset is an answer only when a
+---shipped placement backs it - the pair really does share one spot. Unbacked, it just means the
+---two halves are known to belong together but nothing records how they line up.
+---@param arrangement { offset: number[], vanilla: integer }
+---@return boolean
+function workspotSync.hasOffset(arrangement)
+    if (arrangement.vanilla or 0) > 0 then return true end
+
+    local offset = arrangement.offset
+
+    return math.abs(offset[1]) > 1e-4 or math.abs(offset[2]) > 1e-4
+        or math.abs(offset[3]) > 1e-4 or math.abs(offset[4]) > 1e-3
+end
+
 ---Which half of the pair the shipped game points the other at. Nothing in the workspot says it, so
 ---this is only the majority of what was measured, and `false` when nothing was measured at all.
 ---@param partner { masterSelf: integer, masterPartner: integer }
@@ -149,6 +163,10 @@ function workspotSync.getArrangementLabel(arrangement, index)
 
     if arrangement.source == "measured" then
         return "As shipped"
+    end
+
+    if arrangement.source == "scene" then
+        return "As staged in a scene"
     end
 
     return string.format("Arrangement %d", index)

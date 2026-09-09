@@ -16,7 +16,7 @@ local pipelineCommon = require("modules/utils/pipeline/common")
 ---Opened through a request flag consumed on the next draw, like `sessionRestorePopup`, because the
 ---callers (a context menu, the persistence pipeline) are nowhere near the right ImGui window.
 local projectLinkPopup = {
-    popupId = "Project File",
+    popupId = "Project File##wb-projectLinkPopup-wui",
     openRequested = false,
 
     ---@type element? Root group waiting for an answer.

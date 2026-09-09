@@ -20,6 +20,7 @@ local previewControls = require("modules/utils/preview/previewControls")
 local assetFavorites = require("modules/utils/project/assetFavorites")
 local assetValidation = require("modules/utils/game/assetValidation")
 local colorUtil = require("modules/utils/ui/color")
+local workspotSync = require("modules/utils/game/workspotSync")
 
 local types = {
     ["Entity"] = {
@@ -2292,6 +2293,106 @@ local function openBulkFavorite(entries, sourceLabel)
     spawnUI.favoritesUI.openBulkAdd(activeSpawnList.modulePath, buildFavoriteItems(entries), sourceLabel)
 end
 
+local AI_SPOT_MODULE_PATH = "ai/aiSpot"
+
+-- Warmer than the asset origin chips it sits next to, since it is an action and not a label.
+local DUO_WORKSPOT_TAG_COLOR = 0xFF2C7DBF
+local DUO_WORKSPOT_TAG_HOVERED = 0xFF3E93D8
+local DUO_WORKSPOT_TAG_ACTIVE = 0xFF1F63A0
+
+---The pair a synced-workspot entry spawns as a duo: its best documented partner and arrangement.
+---Cached on the entry, the mapping behind it does not change within a session.
+---@param entry table?
+---@param spawnList table?
+---@return { partner: table, arrangement: table }?
+local function getEntryDuoWorkspot(entry, spawnList)
+    if not entry or not spawnList or spawnList.modulePath ~= AI_SPOT_MODULE_PATH then
+        return nil
+    end
+
+    if entry.duoWorkspot == nil then
+        local partner = workspotSync.getPartners(getEntryAssetPath(entry, spawnList))[1]
+        local arrangement = partner and partner.arrangements[1]
+
+        entry.duoWorkspot = arrangement and { partner = partner, arrangement = arrangement } or false
+    end
+
+    return entry.duoWorkspot or nil
+end
+
+---Draws the clickable "Duo workspots" tag of a search-result row.
+---@param partner table Entry from `workspotSync.getPartners`
+---@return boolean clicked
+local function drawDuoWorkspotTag(partner)
+    ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 6 * style.viewSize)
+    ImGui.PushStyleColor(ImGuiCol.Button, DUO_WORKSPOT_TAG_COLOR)
+    ImGui.PushStyleColor(ImGuiCol.ButtonHovered, DUO_WORKSPOT_TAG_HOVERED)
+    ImGui.PushStyleColor(ImGuiCol.ButtonActive, DUO_WORKSPOT_TAG_ACTIVE)
+
+    local clicked = ImGui.Button(IconGlyphs.AccountMultiple .. "##duoWorkspot")
+
+    ImGui.PopStyleColor(3)
+    ImGui.PopStyleVar()
+
+    style.tooltip("Duo workspots\nThis workspot is part of a synced animation, played together with : \n"
+        .. utils.getFileName(partner.path)
+        .. "\n\nClick to spawn both workspots."
+        .. (workspotSync.hasOffset(partner.arrangements[1]) and ""
+            or "\nNo offset is known for this pair, so the second spot lands on the first one and has to be placed by hand."))
+
+    return clicked
+end
+
+---Spawns both halves of a synced workspot into a group of their own.
+---@param entry table
+---@param spawnList table
+---@param duo { partner: table, arrangement: table }
+local function spawnDuoWorkspot(entry, spawnList, duo)
+    if groupLoadManager.isActive() then return end
+
+    local assetPath = getEntryAssetPath(entry, spawnList)
+    if rejectIncompatibleAsset(AI_SPOT_MODULE_PATH, assetPath) then return end
+
+    sessionSnapshot.consume("spawned an asset")
+    spawnUI.stopActiveAssetPreview()
+
+    local pos, rot = spawnUI.getSpawnNewPosition()
+
+    local group = require("modules/classes/editor/positionableGroup"):new(spawnUI.spawnedUI)
+    group.name = utils.getFileName(assetPath)
+    group:setParent(spawnUI.getSpawnTargetParent())
+
+    local data = utils.deepcopy(entry.data)
+    data.modulePath = AI_SPOT_MODULE_PATH
+    applySpawnNewEntryDefaults(data)
+    data.position = { x = pos.x, y = pos.y, z = pos.z, w = 0 }
+    data.rotation = { roll = rot.roll, pitch = rot.pitch, yaw = rot.yaw }
+
+    local first = require("modules/classes/editor/spawnableElement"):new(spawnUI.spawnedUI)
+    first:load({
+        name = utils.getFileName(entry.name),
+        modulePath = first.modulePath,
+        spawnable = data
+    })
+    first:setParent(group)
+
+    -- The complementary spot places itself off this one, so it is spawned once the first half sits
+    -- in the group. Both inserts are covered by the group's own undo entry below.
+    local selfLeads = workspotSync.doesSelfLead(duo.partner)
+    local success, status = first.spawnable:spawnComplementarySpot(duo.partner, duo.arrangement, selfLeads, {
+        recordHistory = false
+    })
+
+    if not success then
+        logger:warn(string.format("Could not complete the workspot duo of %s: %s", assetPath, status))
+    end
+
+    spawnUI.spawnedUI.unselectAll()
+    group:setSelected(true)
+
+    history.addAction(history.getInsert({ group }))
+end
+
 ---Draws one interactive search-result row.
 ---Used by both the classic flat list and the hierarchy tree leaves.
 ---@param entry table
@@ -2330,6 +2431,14 @@ local function drawSpawnResultEntryRow(entry, activeSpawnList, xSpace, buttonTex
     local originTagInfo = getEntryPathOriginTagInfo(entry, activeSpawnList)
     if originTagInfo and entry.lastSpawned == nil then
         drawPathOriginTagChip(originTagInfo)
+        ImGui.SameLine()
+    end
+
+    local duo = getEntryDuoWorkspot(entry, activeSpawnList)
+    if duo and entry.lastSpawned == nil then
+        if drawDuoWorkspotTag(duo.partner) and not ImGui.IsMouseDragging(0, style.draggingThreshold) then
+            spawnDuoWorkspot(entry, activeSpawnList, duo)
+        end
         ImGui.SameLine()
     end
 
