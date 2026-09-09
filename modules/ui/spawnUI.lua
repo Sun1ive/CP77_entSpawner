@@ -145,6 +145,7 @@ local modulePathToVariantLabel = {}
 local spawnNewVisualizerClassGroups = {}
 local spawnNewVisualizerModuleSet = {}
 local STATIC_LIGHT_MODULE_PATH = "light/light"
+local AI_SPOT_MODULE_PATH = "ai/aiSpot"
 local DEFAULT_STATIC_LIGHT_COLOR = { 1, 0.99595707654953, 0.6502890586853 }
 local STATIC_LIGHT_TYPES = {
     [0] = true,
@@ -871,6 +872,8 @@ end
 ---@field showAndFilterToggle boolean? Whether the combo exposes an AND/OR mode toggle.
 ---@field defaultAndFilter boolean? Initial AND/OR mode for new filter state.
 ---@field formatOptionLabel fun(option: SpawnEntryFilterOption): string? Optional display label for an option.
+---@field formatSelectionLabel fun(key: string): string? Optional display label for a single selected key.
+---@field showSelectionTooltip boolean? Whether hovering the combo lists its selected raw keys.
 ---@field matchesOption fun(option: SpawnEntryFilterOption, searchValue: string, idx: integer): boolean? Optional option-list search matcher.
 ---@field compareOptions fun(a: SpawnEntryFilterOption, b: SpawnEntryFilterOption): boolean? Optional option-list sort comparator.
 ---@field createState fun(): table? Extra fields merged into this filter's per-list state on creation.
@@ -1122,6 +1125,33 @@ local entryFilters = {
         accepts = acceptsSelectedKey
     },
     {
+        -- Synced workspots are indexed separately from rig metadata. Keep this as a one-click
+        -- predicate so it composes with both the text search and the supported-rig filter.
+        id = "duoWorkspot",
+        label = "Duo workspots",
+        supports = function (spawnList) return spawnList.modulePath == AI_SPOT_MODULE_PATH end,
+        createState = function ()
+            return { enabled = false }
+        end,
+        isActiveState = function (state)
+            return state.enabled == true
+        end,
+        acceptsEntry = function (entry, spawnList)
+            return workspotSync.isSynced(getEntryAssetPath(entry, spawnList))
+        end,
+        drawCustom = function (filter, spawnList, state)
+            style.fieldLabel(filter.label)
+            local nextEnabled, changed = style.toggleButton(
+                IconGlyphs.AccountMultiple .. "##duoWorkspotFilter",
+                state.enabled == true
+            )
+            state.enabled = nextEnabled
+            style.tooltip("Show only workspots that are part of a synced animation.")
+
+            return changed
+        end
+    },
+    {
         id = "workspotRig",
         label = "Supported rig",
         allLabel = "All rigs",
@@ -1132,7 +1162,7 @@ local entryFilters = {
         selectAllTooltip = "Select all rigs",
         unselectAllTooltip = "Unselect all rigs (default behavior: show all)",
         clearTooltip = "Clear selected rig filters",
-        comboWidth = 300,
+        comboWidth = 200,
         supports = function (spawnList) return spawnList.entryFilter == "workspotRig" end,
         resolveKeys = function (entry, spawnList)
             return aiSpotClass.getWorkspotRigFilterKeys(getEntryAssetPath(entry, spawnList))
@@ -1141,6 +1171,8 @@ local entryFilters = {
         formatOptionLabel = function (option)
             return aiSpotClass.getRigDisplayName(option.key)
         end,
+        formatSelectionLabel = aiSpotClass.getRigDisplayName,
+        showSelectionTooltip = true,
         compareOptions = function (a, b)
             local aCharacter = aiSpotClass.isCharacterRig(a.key)
             local bCharacter = aiSpotClass.isCharacterRig(b.key)
@@ -1660,10 +1692,31 @@ end
 local function drawFilterCombo(filter, spawnList, state)
     style.fieldLabel(filter.label)
 
+    local selectionTooltip = nil
+    if filter.showSelectionTooltip then
+        local selectedKeys = {}
+        for key, isSelected in pairs(state.selections) do
+            if isSelected == true then
+                table.insert(selectedKeys, tostring(key))
+            end
+        end
+        table.sort(selectedKeys)
+
+        selectionTooltip = #selectedKeys > 0
+            and ("Selected:\n" .. table.concat(selectedKeys, "\n"))
+            or filter.allLabel
+    end
+
     local andFilterChanged = false
     local changed, nextSearch = style.drawSearchableMultiSelectCombo({
         comboId = "##" .. filter.id .. "FilterCombo",
-        previewLabel = style.getMultiSelectPreviewLabel(state.selections, filter.allLabel, filter.multiLabel),
+        previewLabel = style.getMultiSelectPreviewLabel(
+            state.selections,
+            filter.allLabel,
+            filter.multiLabel,
+            filter.formatSelectionLabel
+        ),
+        tooltip = selectionTooltip,
         searchHint = filter.searchHint,
         searchValue = state.search,
         getOptions = function ()
@@ -2292,8 +2345,6 @@ local function openBulkFavorite(entries, sourceLabel)
     -- hosting several spawnable classes stores all of its assets under the host.
     spawnUI.favoritesUI.openBulkAdd(activeSpawnList.modulePath, buildFavoriteItems(entries), sourceLabel)
 end
-
-local AI_SPOT_MODULE_PATH = "ai/aiSpot"
 
 -- Warmer than the asset origin chips it sits next to, since it is an action and not a label.
 local DUO_WORKSPOT_TAG_COLOR = 0xFF2C7DBF

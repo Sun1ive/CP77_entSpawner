@@ -2488,6 +2488,7 @@ end
 ---@class SearchableMultiSelectComboOpts
 ---@field comboId string Hidden ImGui ID used for the combo (for example `##deviceClassFilterCombo`).
 ---@field previewLabel string
+---@field tooltip string? Tooltip attached to the collapsed combo.
 ---@field searchHint string?
 ---@field searchValue string?
 ---@field options table?
@@ -2604,7 +2605,12 @@ function style.drawSearchableMultiSelectCombo(opts)
 
     ImGui.PushItemWidth(comboWidth)
     ImGui.SetNextWindowSizeConstraints(1, 1, 10000, maxPopupHeight)
-    if ImGui.BeginCombo(comboId, previewLabel) then
+    local comboOpen = ImGui.BeginCombo(comboId, previewLabel)
+    if opts.tooltip then
+        style.tooltip(opts.tooltip)
+    end
+
+    if comboOpen then
         -- The popup is its own window, so without this the main window counts as unhovered
         -- and the viewport starts taking the clicks / keys meant for the search field.
         input.updateContext("main")
