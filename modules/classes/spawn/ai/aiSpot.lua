@@ -525,14 +525,14 @@ local function drawCommunityAttachModeTabs(currentMode, totalWidth)
         mode = "nodeRef"
     end
     -- One tooltip per button: a single call after the row would only ever hover-test the last one.
-    style.tooltip("The time period references this workspot by its NodeRef.\nAny marking on the time period is cleared.")
+    style.tooltip("Links this period to the workspot's NodeRef. Clears the period's markings.")
 
     ImGui.SameLine()
 
     if style.switchTabButton("Marking##communityAttachModeMarking", mode == "marking", tabWidth, 0) then
         mode = "marking"
     end
-    style.tooltip("The time period references the marking instead, matching every workspot that carries it.\nAny NodeRef on the time period is cleared.")
+    style.tooltip("Links this period to all workspots with this marking. Clears the period's NodeRefs.")
 
     return mode
 end
@@ -1547,7 +1547,7 @@ function aiSpot:drawCommunityAttachPopup()
     ImGui.SameLine()
     ImGui.SetCursorPosX(fieldStartX)
     self.communityAttachNodeRef, _, _ = style.trackedTextField(nil, "##communityAttachNodeRef", self.communityAttachNodeRef, "$/#foobar", math.max(160, inlineFieldWidth - generateButtonWidth))
-    style.tooltip("Identifies this workspot. Written to the workspot on apply, whatever the Link Type is.")
+    style.tooltip("Required workspot ID. Applied regardless of Link Type.")
     ImGui.SameLine()
     style.pushButtonNoBG(true)
     if ImGui.Button(IconGlyphs.ReloadAlert .. "##communityAttachGenerateNodeRef") then
@@ -1599,7 +1599,7 @@ function aiSpot:drawCommunityAttachPopup()
 
                 return origin and string.format("Already on the %s.", origin) or nil
             end,
-            tooltip = "Markings of this workspot and of the selected time period, or any custom value.\nRight click to clear."
+            tooltip = "Choose a marking from this workspot or period, or enter a new one. Right-click to clear."
         }
     )
 
@@ -1737,7 +1737,7 @@ function aiSpot:drawCommunityAttachPopup()
         style.sectionHeaderEnd()
     end
 
-    style.sectionHeaderStart("Link Type", "Which of the two the time period points at.\nThe workspot itself gets both regardless.")
+    style.sectionHeaderStart("Link Type", "What the period links to. The workspot receives both values.")
     self.communityAttachMode = drawCommunityAttachModeTabs(self.communityAttachMode, cardInnerWidth)
 
     if self.communityAttachMode == "marking" and markingValue == "" then
@@ -1878,7 +1878,7 @@ function aiSpot:drawSyncedPair()
     if #partners == 0 then return end
 
     local open = ImGui.TreeNodeEx("Synced Pair", ImGuiTreeNodeFlags.SpanFullWidth)
-    style.tooltip("This workspot is one half of a synced animation.\nSpawn the other half here to get it placed at the offset the pair is played at.")
+    style.tooltip("This is half of a synced animation. Spawn its partner at the saved offset.")
     if not open then return end
 
     if not self.syncPropertyWidth then
@@ -1934,7 +1934,7 @@ function aiSpot:drawSyncedPair()
         ImGui.SameLine()
         ImGui.SetCursorPosX(self.syncPropertyWidth)
         self.syncArrangementIndex, _ = style.trackedCombo(nil, "##syncArrangement", self.syncArrangementIndex, labels, style.getMaxWidth(300), {
-            tooltip = "Where the pair stands relative to each other. The workspot authors one placement per synced\nanimation, and the count is how many pairs the shipped game places that way."
+            tooltip = "Relative placement of the pair. The count shows how often it appears in the base game."
         })
     end
 
@@ -1953,8 +1953,8 @@ function aiSpot:drawSyncedPair()
     local masterChanged
     masterIndex, masterChanged = style.trackedCombo(nil, "##syncMaster", masterIndex, { "This spot", "The new spot" }, style.getMaxWidth(300), {
         tooltip = observed > 0
-            and string.format("Which spot the other one is the child of. The shipped game pairs these two this way\n%d time(s); nothing in the workspot itself says which half leads.", observed)
-            or "Which spot the other one is the child of. No shipped placement of this pair sets masterNodeRef,\nso this is a guess - either direction works."
+            and string.format("Sets the parent spot. The base game uses this direction %d time(s), but either can be master.", observed)
+            or "Sets the parent spot. No base-game example exists, so either direction is valid."
     })
     if masterChanged then
         self.syncMasterIsSelf = masterIndex == 0
@@ -1982,9 +1982,9 @@ function aiSpot:drawSyncedPair()
         end
     end
     style.tooltip((self.syncMasterIsSelf
-        and "Add the second spot of this pair next to this one, placed at the offset above and made\nthe child of this spot."
-        or "Add the second spot of this pair next to this one, placed at the offset above, and make\nthis spot its child.")
-        .. (placed and "" or "\nIts placement is unknown, so it spawns on top of this spot."))
+        and "Spawn the partner at this offset as a child of this spot."
+        or "Spawn the partner at this offset and make this spot its child.")
+        .. (placed and "" or "\nNo offset is known, so it spawns on this spot."))
 
     if self.syncStatus ~= "" then
         style.mutedText(self.syncStatus)
@@ -2010,7 +2010,7 @@ function aiSpot:draw()
         end
         ImGui.OpenPopup(COMMUNITY_ATTACH_POPUP_ID)
     end
-    style.tooltip("Open a popup to add this workspot to a Community phase/time period.")
+    style.tooltip("Add this workspot to a Community time period.")
     self:drawCommunityAttachPopup()
 
     if not self.maxPropertyWidth then
@@ -2062,7 +2062,7 @@ function aiSpot:draw()
                 width = 250,
                 matchContentWidth = false,
                 allowCustom = true,
-                tooltip = "Select a compatible character record, or type one and choose 'Use custom: ...'."
+                tooltip = "Choose a compatible character record or enter a custom one."
             }
         )
         if finished then
@@ -2111,8 +2111,8 @@ function aiSpot:draw()
                 matchContentWidth = true,
                 allowCustom = true,
                 tooltip = #self.apps > 0
-                    and "Appearance used when spawning the preview NPC in this workspot. You can also type one and choose 'Use custom: ...'."
-                    or "No cached appearances yet for this character record. 'default' will be used until loaded, but you can still use a custom value."
+                    and "Appearance for the preview NPC. Choose one or enter a custom value."
+                    or "Appearances are loading. Uses 'default' unless you enter a custom value."
             }
         )
         if changed then
@@ -2138,7 +2138,7 @@ function aiSpot:draw()
                 ImGui.SameLine()
                 ImGui.SetCursorPosX(self.maxPropertyWidth)
                 self.workspotSpeed, changed, _ = style.trackedDragFloat(self.object, "##workspotSpeed", self.workspotSpeed, 0.1, 0, 25, "%.2f", 60)
-                style.tooltip("Speed of the animation of the NPC in the workspot. Preview only.")
+                style.tooltip("Preview animation speed.")
                 if changed and npc then
                     local previewSpeed = self.previewWorkspotFrozen and 0.0 or self.workspotSpeed
                     npc:SetIndividualTimeDilation("", previewSpeed)
@@ -2189,12 +2189,12 @@ function aiSpot:draw()
     ImGui.SameLine()
     ImGui.SetCursorPosX(self.maxPropertyWidth)
     self.isWorkspotInfinite, _ = style.trackedCheckbox(self.object, "##isWorkspotInfinite", self.isWorkspotInfinite, self.workspotDefInfinite)
-    style.tooltip("If checked, the NPC will use this spot indefinitely, while streamed in.\nIf unchecked, the NPC will walk to the next spot defined in its community entry.")
+    style.tooltip("On: the NPC stays here while loaded.\nOff: the NPC moves to the next spot in its Community entry.")
 
     if self.workspotDefInfinite then
         ImGui.SameLine()
         style.styledText(IconGlyphs.AlertOutline, 0xFF2525E5)
-        style.tooltip("This workspot file definition is infinite by default.\nSetting would not have any affect.")
+        style.tooltip("This workspot is always infinite. This setting has no effect.")
     end
 
     style.mutedText("Is Static")
@@ -2213,7 +2213,7 @@ function aiSpot:draw()
         hint = "$/#ai_spot",
         listHeight = 140,
         emptyListText = "No other AI Spot with a NodeRef in this project.",
-        tooltip = "Makes this spot the child of another one, which is how a synced workspot pairs two NPCs.\nOnly AI Spots that have a NodeRef are listed, a spot without one can not be referenced.\nThis spot is unavailable while its master is taken."
+        tooltip = "Makes this the child of another AI Spot for synced animations.\nOnly spots with a NodeRef are listed. This spot is unavailable while its master is occupied."
     })
 
     if ImGui.TreeNodeEx("Markings", ImGuiTreeNodeFlags.SpanFullWidth) then
@@ -2237,7 +2237,7 @@ function aiSpot:draw()
 
         ImGui.TreePop()
     end
-    style.tooltip("Still requires assigning a NodeRef to this spot.")
+    style.tooltip("A NodeRef is still required when using markings.")
 end
 
 function aiSpot:getProperties()
@@ -2263,7 +2263,7 @@ function aiSpot:getGroupedProperties()
                     end
                 end
             end
-            style.tooltip("Clears the markings list of all selected AISpot's.")
+            style.tooltip("Remove all markings from the selected AI Spots.")
 
             ImGui.SetNextItemWidth(150 * style.viewSize)
             element.groupOperationData["aiSpotGrouped"].marking, _ = style.inputTextWithHint("##markings", "Marking", element.groupOperationData["aiSpotGrouped"].marking, 100)
@@ -2281,7 +2281,7 @@ function aiSpot:getGroupedProperties()
 
                 element.groupOperationData["aiSpotGrouped"].marking = ""
             end
-            style.tooltip("Adds the specified marking to the markings list of all selected AISpot's.")
+            style.tooltip("Add this marking to the selected AI Spots.")
         end,
 		entries = { self.object }
 	}

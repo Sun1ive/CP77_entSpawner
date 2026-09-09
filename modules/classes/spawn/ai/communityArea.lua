@@ -30,16 +30,16 @@ local AREA_TYPE_NODES = {
     Background = "worldCompiledCommunityAreaNode_Streamable"
 }
 local DEFAULT_AREA_TYPE = "Streamable"
-local AREA_TYPE_TOOLTIP = "Quest (Regular): the area node is moved into the project's always loaded sector on export, so the community never streams out. Entries usually start inactive and get switched on by a script or questphase.\n\nStreamable: the area node streams in and out with the sector it sits in. The default for a placed scene.\n\nBackground: same node as Streamable, meant for ambient population that changes over the day. Time periods with a quantity of 0 are the normal way to empty a place at certain hours."
+local AREA_TYPE_TOOLTIP = "Quest (Regular): always loaded. Entries usually start inactive until a script or quest phase activates them.\n\nStreamable: loads with its sector. Default for placed scenes.\n\nBackground: streamable ambient population that changes over time. Set a period's Quantity to 0 to empty the area."
 
 ---Initializer kinds of `communitySpawnEntry.initializers`.
 local INITIALIZER_KINDS = { "voiceTag", "patrol", "squad" }
 local INITIALIZER_LABELS = { voiceTag = "Voice Tag", patrol = "Patrol", squad = "Squad" }
 local INITIALIZER_ICONS = { voiceTag = IconGlyphs.AccountVoice, patrol = IconGlyphs.MapMarkerPath, squad = IconGlyphs.AccountGroupOutline }
 local INITIALIZER_TOOLTIPS = {
-    voiceTag = "Overrides the voice tag of the character record, so this entry's NPCs use a different voice.",
-    patrol = "Sends this entry's NPCs along a Patrol Spline instead of leaving them at their spots.",
-    squad = "Puts this entry's NPCs in a squad, so they fight and react as one group."
+    voiceTag = "Changes the voice used by this entry's NPCs.",
+    patrol = "Makes this entry's NPCs follow a Patrol Spline.",
+    squad = "Groups this entry's NPCs so they fight and react together."
 }
 local INITIALIZER_PRESENT_TOOLTIP = "This entry already has one."
 local MOVEMENT_TYPES = { "Walk", "Run", "Sprint", "Strafe", "Stand" }
@@ -64,7 +64,7 @@ local PATROL_ACTIONS = {
     "DroneGriffinArchetype.DefaultPatrolAction",
     "DroneOctantArchetype.DefaultPatrolAction"
 }
-local PATROL_ACTION_TOOLTIP = "Action played at each patrol point.\nDefaultPatrolAction just walks the path and is what almost every shipped patrol uses.\nThe scan and drone variants add a look around and are meant for drones.\nType a TweakDBID and choose 'Use custom: ...' for your own record."
+local PATROL_ACTION_TOOLTIP = "Action used at each patrol point.\nDefaultPatrolAction only walks the path. Scan actions make drones look around.\nChoose an action or enter a custom TweakDBID."
 
 ---`communityESquadType`, in enum order. `Unknown` is the engine's fallback and is not authorable.
 local SQUAD_TYPES = { "Global", "Community", "Security" }
@@ -95,11 +95,11 @@ local FACTION_SQUADS = {
     "FactionSquads.VoodooBoysSquad",
     "FactionSquads.WraithsSquad"
 }
-local SQUAD_TYPE_TOOLTIP = "Global: one squad shared by the whole world.\nCommunity: a squad of this community, named by a FactionSquads record. This is what a placed group of NPCs wants.\nSecurity: joins the squad of a security area, named by that area."
-local SQUAD_NAME_TOOLTIP = "Squad the NPCs join.\nA Community squad is a FactionSquads record, which also sets their faction and how they fight.\nFor a Security squad, type the name of the security area instead."
+local SQUAD_TYPE_TOOLTIP = "Global: shared across the world.\nCommunity: a local group using a FactionSquads record. Use for placed NPC groups.\nSecurity: uses a security area's squad."
+local SQUAD_NAME_TOOLTIP = "Squad to join.\nFor Community, choose a FactionSquads record.\nFor Security, enter the security area name."
 
-local PERIOD_HOUR_USED_TOOLTIP = "Already used by another time period of this phase.\nA phase can not have two time periods for the same hour."
-local PERIOD_HOUR_DUPLICATE_TOOLTIP = "This hour is used by another time period of this phase.\nOnly one of them will be used by the game, pick a different hour."
+local PERIOD_HOUR_USED_TOOLTIP = "Another period in this phase already uses this hour."
+local PERIOD_HOUR_DUPLICATE_TOOLTIP = "Another period uses this hour. Choose a different one."
 local PERIOD_HOURS_EXHAUSTED_TOOLTIP = "This phase already uses every available time period."
 
 ---@type fun(value: any, fallback: any?): string
@@ -830,8 +830,8 @@ function community:drawPhaseAppearances(entryKey, phaseKey, entry, phase)
                 matchContentWidth = true,
                 allowCustom = true,
                 tooltip = loaded
-                    and "Select an appearance from the selected character record, or type one and choose 'Use custom: ...'."
-                    or "Appearances are loading for the selected character record. 'default' is available until the list is cached. You can still use a custom value."
+                    and "Choose an appearance or enter a custom one."
+                    or "Appearances are loading. Use 'default' or enter a custom value."
             }
         )
         self.phaseAppearanceSearch[searchKey] = search
@@ -879,7 +879,7 @@ function community:drawVoiceTagInitializer(entryKey, key, initializer)
             width = math.max(140, style.getMaxWidth(260) - 40),
             matchContentWidth = true,
             allowCustom = true,
-            tooltip = "Voice tag this entry's NPCs speak with, e.g. civ_low_m_46_afam_40.\nType one and choose 'Use custom: ...' for a tag that is not listed."
+            tooltip = "Voice used by this entry's NPCs. Choose a tag or enter a custom one."
         }
     )
     self.initializerVoiceSearch[searchKey] = search
@@ -906,7 +906,7 @@ function community:drawPatrolInitializer(entryKey, key, initializer)
         hint = "$/#patrol_spline",
         listHeight = 140,
         emptyListText = "No Patrol Spline with a NodeRef in this project.",
-        tooltip = "Patrol Spline the NPCs walk. Only Patrol Splines that have a NodeRef are listed, a spline without one can not be referenced."
+        tooltip = "Path the NPCs patrol. Only splines with a NodeRef are listed."
     })
     ImGui.SameLine()
 
@@ -938,12 +938,12 @@ function community:drawPatrolInitializer(entryKey, key, initializer)
 
         drawLabel("Movement Type")
         initializer.movementType, _ = style.trackedCombo(self.object, "##movementType", initializer.movementType, MOVEMENT_TYPES, 160, {
-            tooltip = "Speed the NPCs move along the path at."
+            tooltip = "NPC movement speed along the path."
         })
 
         drawLabel("Continuation Policy")
         initializer.continuationPolicy, _ = style.trackedCombo(self.object, "##continuationPolicy", initializer.continuationPolicy, CONTINUATION_POLICIES, 160, {
-            tooltip = "Where the NPCs resume the path after being interrupted."
+            tooltip = "Where NPCs resume after an interruption."
         })
 
         drawLabel("Patrol Action")
@@ -966,19 +966,19 @@ function community:drawPatrolInitializer(entryKey, key, initializer)
         self.initializerActionSearch[actionSearchKey] = actionSearch
 
         drawLabel("Start From Closest Point")
-        style.tooltip("If true, the NPCs join the path at the point nearest to them instead of at its start.")
+        style.tooltip("Joins the path at the nearest point instead of its start.")
         initializer.startFromClosestPoint, _ = style.trackedCheckbox(self.object, "##startFromClosestPoint", initializer.startFromClosestPoint)
 
         drawLabel("Patrol With Weapon")
-        style.tooltip("If true, the NPCs walk the path with their weapon drawn.")
+        style.tooltip("NPCs patrol with their weapons drawn.")
         initializer.patrolWithWeapon, _ = style.trackedCheckbox(self.object, "##patrolWithWeapon", initializer.patrolWithWeapon)
 
         drawLabel("Back And Forth")
-        style.tooltip("If true, the NPCs walk the path back to its start instead of looping around to it.")
+        style.tooltip("NPCs retrace the path instead of looping to its start.")
         initializer.isBackAndForth, _ = style.trackedCheckbox(self.object, "##isBackAndForth", initializer.isBackAndForth)
 
         drawLabel("Infinite")
-        style.tooltip("If true, the NPCs keep patrolling for as long as they are spawned.")
+        style.tooltip("NPCs patrol for as long as they are spawned.")
         initializer.isInfinite, _ = style.trackedCheckbox(self.object, "##isInfinite", initializer.isInfinite)
 
         drawLabel("Number Of Loops")
@@ -989,10 +989,10 @@ function community:drawPatrolInitializer(entryKey, key, initializer)
             initializer.numberOfLoops = math.floor(initializer.numberOfLoops)
         end
         ImGui.EndDisabled()
-        style.tooltip("How many times the path is walked. Ignored while Infinite is on.", ImGuiHoveredFlags.AllowWhenDisabled)
+        style.tooltip("Number of patrol loops. Ignored when Infinite is on.", ImGuiHoveredFlags.AllowWhenDisabled)
 
         drawLabel("Sort Patrol Points")
-        style.tooltip("If true, the patrol points are walked in the order of the spline instead of the order they were authored in.")
+        style.tooltip("Uses the spline's point order instead of the authored order.")
         initializer.sortPatrolPoints, _ = style.trackedCheckbox(self.object, "##sortPatrolPoints", initializer.sortPatrolPoints)
 
         ImGui.EndPopup()
@@ -1062,7 +1062,7 @@ function community:drawEntryInitializers(entryKey, entry)
     if ImGui.Button("+##addInitializer") then
         ImGui.OpenPopup("##addInitializerPopup")
     end
-    style.tooltip("Add an initializer, which overrides a property of the character record for this entry.")
+    style.tooltip("Override a character property for this entry.")
 
     style.constrainPopupToViewport("##addInitializerPopup")
     if ImGui.BeginPopup("##addInitializerPopup") then
@@ -1226,7 +1226,7 @@ function community:drawPeriod(periods, periodKey, periodHierarchyKey)
             history.addAction(history.getElementChange(self.object))
             period.isSequence = nextSequence
         end
-        style.tooltip("Is Sequence: " .. tostring(period.isSequence) .. "\nIf true, the NPC(s) will use their assigned AISpot's in the same order as they are listed.\nOtherwise they will use them randomly.\nOnly relevant if AISpots are not set to be infinite.")
+        style.tooltip("Sequence: " .. tostring(period.isSequence) .. "\nUses assigned AI Spots in list order instead of randomly. Ignored for infinite spots.")
 
         ImGui.SameLine()
         local changed
@@ -1234,7 +1234,7 @@ function community:drawPeriod(periods, periodKey, periodHierarchyKey)
         if changed then
             period.quantity = math.floor(period.quantity)
         end
-        style.tooltip("Quantity: " .. tostring(period.quantity) .. "\nNumber of NPC slots active during this time period.\nSet it to 0 to have nobody spawn during this period, which is how a place is left empty at certain hours.")
+        style.tooltip("Quantity: " .. tostring(period.quantity) .. "\nNPC slots active during this period. Use 0 to spawn no one.")
     else
         style.drawIconLabelRow(nil, string.format("[%d] %s", periodKey, periodLabel))
         if isDuplicateHour then
@@ -1445,7 +1445,7 @@ function community:drawPhases(entryKey, entry, entryHierarchyKey)
             ImGui.Indent(hierarchyIndent())
             ImGui.Dummy(0, 4 * style.viewSize)
             style.mutedText("Always Spawned")
-            style.tooltip("If true, the actors in this phase will always be spawned, regardless of whether enough workspots are available.")
+            style.tooltip("Spawns this phase's NPCs even when there are not enough workspots.")
             ImGui.SameLine()
             phase.alwaysSpawned, _ = style.trackedCheckbox(self.object, "##alwaysSpawned", phase.alwaysSpawned)
             ImGui.Dummy(0, 8 * style.viewSize)
@@ -1565,7 +1565,7 @@ function community:drawEntries()
                     width = 160,
                     matchContentWidth = true,
                     allowCustom = true,
-                    tooltip = "Select the character record (TweakDBID) for this community entry, or type one and choose 'Use custom: ...'."
+                    tooltip = "Choose a character record or enter a custom TweakDBID."
                 }
             )
             self.entryRecordSearch[entryKey] = recordSearch
@@ -1618,11 +1618,11 @@ function community:drawEntries()
                 self.entryInitialPhaseSearch[phaseSearchKey] = phaseSearch
 
                 drawEntrySettingLabel("Active On Start")
-                style.tooltip("If true, this entry will be active when the community is first loaded.\nIf false, it will be inactive until activated by a script or a questphase.")
+                style.tooltip("Starts this entry when the community loads. Otherwise, a script or quest phase must activate it.")
                 entry.entryActiveOnStart, _ = style.trackedCheckbox(self.object, "##activeOnStart", entry.entryActiveOnStart)
 
                 drawEntrySettingLabel("Spawn In View")
-                style.tooltip("Determine whether the item can appear within the player's field of view when activated.\nIf set to false, it will wait for the player to look away.")
+                style.tooltip("Allows NPCs to appear in view. When off, they wait until the player looks away.")
                 entry.spawnInView, _ = style.trackedCheckbox(self.object, "##spawnInView", entry.spawnInView)
                 ImGui.EndPopup()
             end
@@ -1690,7 +1690,7 @@ function community:draw()
 
     local x = utils.getTextMaxWidth({"Visualize position", "CommunityID (NodeRef)", "Area Type"}) + 4 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
     self:drawPreviewCheckbox("Visualize position", x)
-    style.tooltip("Preview a sphere, to make the community selectable in editor mode.")
+    style.tooltip("Show a selectable sphere in editor mode.")
 
     style.mutedText("Area Type")
     ImGui.SameLine()
