@@ -312,7 +312,7 @@ function patrolSpline:drawPatrolPointsSection()
         ImGui.SetCursorPosX(fieldStartX)
 
         local typeIndex = pointTypeIndexByValue[def.pointType] or 1
-        local newTypeIndex, typeChanged = style.trackedCombo(self.object, "##pointType", typeIndex - 1, pointTypes, 110, {
+        local newTypeIndex, typeChanged = style.trackedCombo(self.object, "##pointType", typeIndex - 1, pointTypes, 100, {
             tooltip = pointTypeTooltip
         })
         if typeChanged then

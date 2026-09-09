@@ -9,6 +9,7 @@ local Cron = require("modules/utils/vendor/Cron")
 local settings = require("modules/utils/core/settings")
 local config = require("modules/utils/core/config")
 local registry = require("modules/utils/game/nodeRefRegistry")
+local workspotSync = require("modules/utils/game/workspotSync")
 
 local characterRecords = nil
 local recordRigCacheRevision = 0
@@ -366,6 +367,8 @@ end
 ---@field isWorkspotInfinite boolean
 ---@field isWorkspotStatic boolean
 ---@field markings table
+---@field masterNodeRef string
+---@field enabledWhenMasterOccupied boolean
 ---@field maxPropertyWidth number
 ---@field npcID entEntityID
 ---@field npcSpawning boolean
@@ -785,13 +788,30 @@ local function getMarkingOptions(spot, period)
     return options, origins
 end
 
-local function createDefaultCommunityEntry(index)
+---New entry and phase defaults come from the community, they depend on its area type.
+---@param index number
+---@param communitySpawnable table
+---@return table
+local function createDefaultCommunityEntry(index, communitySpawnable)
     return {
         entryName = "entry_" .. tostring(index),
         characterRecordId = "",
         initialPhaseName = "default",
-        entryActiveOnStart = true,
+        entryActiveOnStart = communitySpawnable:getDefaultEntryActiveOnStart(),
+        initializers = {},
         phases = {}
+    }
+end
+
+---@param index number
+---@param communitySpawnable table
+---@return table
+local function createDefaultCommunityPhase(index, communitySpawnable)
+    return {
+        phaseName = "phase_" .. tostring(index),
+        appearances = {},
+        alwaysSpawned = communitySpawnable:getDefaultAlwaysSpawned(),
+        timePeriods = {}
     }
 end
 
@@ -821,6 +841,18 @@ function aiSpot:new()
     o.isWorkspotInfinite = true
     o.isWorkspotStatic = false
     o.markings = {}
+    o.masterNodeRef = ""
+    o.enabledWhenMasterOccupied = false
+    o.masterPropertyWidth = nil
+
+    -- Synced-pair picker state. Transient: it follows the workspot, not the saved project.
+    o.syncPartners = nil
+    o.syncPartnersPath = nil
+    o.syncPartnerIndex = 0
+    o.syncArrangementIndex = 0
+    o.syncMasterIsSelf = nil
+    o.syncPropertyWidth = nil
+    o.syncStatus = ""
 
     o.maxPropertyWidth = nil
     o.npcID = nil
@@ -878,6 +910,8 @@ function aiSpot:loadSpawnData(data, position, rotation)
         self.workSequence = { idleAnim = "" }
     end
     self.workSequence.idleAnim = sanitizePreviewValue(self.workSequence.idleAnim, "")
+    self.masterNodeRef = sanitizePreviewValue(self.masterNodeRef, "")
+    self.enabledWhenMasterOccupied = self.enabledWhenMasterOccupied == true
 end
 
 function aiSpot:getVisualizerSize()
@@ -1258,6 +1292,8 @@ function aiSpot:save()
     data.isWorkspotInfinite = self.isWorkspotInfinite
     data.isWorkspotStatic = self.isWorkspotStatic
     data.markings = utils.deepcopy(self.markings)
+    data.masterNodeRef = self.masterNodeRef
+    data.enabledWhenMasterOccupied = self.enabledWhenMasterOccupied
 
     return data
 end
@@ -1324,12 +1360,12 @@ function aiSpot:applyCommunityAttachment(communityTarget, entrySelection, phaseS
     local entryIndex
     if entrySelection.append then
         entryIndex = #communitySpawnable.entries + 1
-        entry = createDefaultCommunityEntry(entryIndex)
+        entry = createDefaultCommunityEntry(entryIndex, communitySpawnable)
         table.insert(communitySpawnable.entries, entry)
     else
         entryIndex = math.max(1, tonumber(entrySelection.entryIndex) or 1)
         while #communitySpawnable.entries < entryIndex do
-            table.insert(communitySpawnable.entries, createDefaultCommunityEntry(#communitySpawnable.entries + 1))
+            table.insert(communitySpawnable.entries, createDefaultCommunityEntry(#communitySpawnable.entries + 1, communitySpawnable))
         end
         entry = communitySpawnable.entries[entryIndex]
     end
@@ -1337,30 +1373,26 @@ function aiSpot:applyCommunityAttachment(communityTarget, entrySelection, phaseS
     entry.entryName = sanitizePreviewValue(entry.entryName, "entry_" .. tostring(entryIndex))
     entry.characterRecordId = sanitizePreviewValue(entry.characterRecordId, "")
     entry.initialPhaseName = sanitizePreviewValue(entry.initialPhaseName, "")
-    entry.entryActiveOnStart = entry.entryActiveOnStart ~= false
+    if entry.entryActiveOnStart == nil then
+        entry.entryActiveOnStart = communitySpawnable:getDefaultEntryActiveOnStart()
+    else
+        entry.entryActiveOnStart = entry.entryActiveOnStart ~= false
+    end
+    entry.initializers = entry.initializers or {}
     entry.phases = entry.phases or {}
 
     local phase
     if phaseSelection.append then
-        local phaseName = "phase_" .. tostring(#entry.phases + 1)
-        phase = {
-            phaseName = phaseName,
-            appearances = {},
-            timePeriods = {}
-        }
+        phase = createDefaultCommunityPhase(#entry.phases + 1, communitySpawnable)
         table.insert(entry.phases, phase)
 
         if entry.initialPhaseName == "" then
-            entry.initialPhaseName = phaseName
+            entry.initialPhaseName = phase.phaseName
         end
     else
         local phaseIndex = math.max(1, tonumber(phaseSelection.phaseIndex) or 1)
         while #entry.phases < phaseIndex do
-            table.insert(entry.phases, {
-                phaseName = "phase_" .. tostring(#entry.phases + 1),
-                appearances = {},
-                timePeriods = {}
-            })
+            table.insert(entry.phases, createDefaultCommunityPhase(#entry.phases + 1, communitySpawnable))
         end
         phase = entry.phases[phaseIndex]
     end
@@ -1756,6 +1788,201 @@ function aiSpot:drawCommunityAttachPopup()
     ImGui.EndPopup()
 end
 
+---Complementary workspots for this spot's own workspot, empty when it is not a synced one.
+---The store is read-only and shared, so the list is handed out as-is.
+---@return { path: string, vanilla: integer, arrangements: table[] }[]
+function aiSpot:getSyncPartners()
+    if self.syncPartnersPath ~= self.spawnData then
+        self.syncPartnersPath = self.spawnData
+        self.syncPartners = workspotSync.getPartners(self.spawnData)
+        self.syncPartnerIndex = 0
+        self.syncArrangementIndex = 0
+        self.syncMasterIsSelf = nil
+        self.syncStatus = ""
+    end
+
+    return self.syncPartners or {}
+end
+
+---Spawns the other half of a synced workspot pair as a sibling, placed by the sync offset, and
+---pairs the two through masterNodeRef so they export as one synced scene.
+---@param partner table Entry from `aiSpot:getSyncPartners`
+---@param arrangement table One of `partner.arrangements`
+---@param selfLeads boolean This spot is the master, the new one its child.
+---@return boolean success
+---@return string status
+function aiSpot:spawnComplementarySpot(partner, arrangement, selfLeads)
+    local element = self.object
+
+    if not element or not element.parent or not element.sUI then
+        return false, "This spot is not placed in the project yet."
+    end
+    if element:isLocked() then
+        return false, "This spot is locked."
+    end
+
+    -- Snapshot before the NodeRef below is written, so one undo takes back both halves.
+    local changeAction = history.getElementChange(element)
+
+    -- Whichever spot leads has to be referenceable by the other.
+    if selfLeads and sanitizePreviewValue(self.nodeRef, "") == "" then
+        self.nodeRef = registry.generate(element)
+    end
+
+    local position, rotation = workspotSync.getPartnerTransform(self.position, self.rotation, arrangement.offset)
+
+    local data = element:serialize()
+    data.name = utils.getFileName(partner.path)
+
+    local spawnable = data.spawnable
+    spawnable.spawnData = partner.path
+    spawnable.position = position
+    spawnable.rotation = rotation
+    spawnable.nodeRef = ""
+    spawnable.masterNodeRef = selfLeads and self.nodeRef or ""
+    spawnable.enabledWhenMasterOccupied = false
+    -- Markings bind a spot to a community time period, so copying them would bind the pair twice.
+    spawnable.markings = {}
+
+    -- The two halves of a pair are often authored for different body types, so a record inherited
+    -- from this spot can be one the complementary workspot has no animations for.
+    local partnerRigs = getWorkspotRigsFromStore(partner.path) or {}
+    if not isRecordSupportedForRigs(spawnable.previewNPC, partnerRigs) then
+        spawnable.previewNPC = settings.defaultAISpotNPC
+        spawnable.previewNPCAppearance = settings.defaultAISpotAppearance or "default"
+    end
+
+    element.sUI.unselectAll()
+
+    local new = require(data.modulePath):new(element.sUI)
+    new:load(data)
+    new:setParent(element.parent, utils.indexValue(element.parent.childs, element) + 1)
+    new:setSelected(true)
+
+    -- The new spot leads: it only gets a NodeRef once it is parented and named, since that is what
+    -- the generated ref is built from.
+    if not selfLeads then
+        registry.invalidate()
+        new.spawnable.nodeRef = registry.generate(new)
+        self.masterNodeRef = new.spawnable.nodeRef
+        self.enabledWhenMasterOccupied = false
+    end
+
+    registry.invalidate()
+    history.addAction(history.getComposite({ changeAction, history.getInsert({ new }) }))
+
+    return true, string.format("Spawned %s", data.name)
+end
+
+function aiSpot:drawSyncedPair()
+    local partners = self:getSyncPartners()
+    if #partners == 0 then return end
+
+    local open = ImGui.TreeNodeEx("Synced Pair", ImGuiTreeNodeFlags.SpanFullWidth)
+    style.tooltip("This workspot is one half of a synced animation.\nSpawn the other half here to get it placed at the exact offset the animation was authored for.")
+    if not open then return end
+
+    if not self.syncPropertyWidth then
+        self.syncPropertyWidth = utils.getTextMaxWidth({ "Complementary Spot", "Arrangement" }) + 2 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
+    end
+
+    if self.syncPartnerIndex >= #partners then
+        self.syncPartnerIndex = 0
+    end
+
+    if #partners > 1 then
+        local labels = {}
+        for _, partner in ipairs(partners) do
+            table.insert(labels, utils.getFileName(partner.path))
+        end
+
+        style.mutedText("Complementary Spot")
+        ImGui.SameLine()
+        ImGui.SetCursorPosX(self.syncPropertyWidth)
+        local changed
+        self.syncPartnerIndex, changed = style.trackedCombo(nil, "##syncPartner", self.syncPartnerIndex, labels, style.getMaxWidth(300), {
+            tooltip = "The workspot the second NPC of this pair uses."
+        })
+        if changed then
+            self.syncArrangementIndex = 0
+            self.syncMasterIsSelf = nil
+            self.syncStatus = ""
+        end
+    else
+        style.mutedText("Complementary Spot")
+        ImGui.SameLine()
+        ImGui.SetCursorPosX(self.syncPropertyWidth)
+        ImGui.Text(utils.getFileName(partners[1].path))
+        style.tooltip(partners[1].path)
+    end
+
+    local partner = partners[self.syncPartnerIndex + 1]
+    if self.syncArrangementIndex >= #partner.arrangements then
+        self.syncArrangementIndex = 0
+    end
+
+    if #partner.arrangements > 1 then
+        local labels = {}
+        for index, arrangement in ipairs(partner.arrangements) do
+            local label = workspotSync.getArrangementLabel(arrangement, index)
+            if arrangement.vanilla > 0 then
+                label = string.format("%s (%d in game)", label, arrangement.vanilla)
+            end
+            table.insert(labels, label)
+        end
+
+        style.mutedText("Arrangement")
+        ImGui.SameLine()
+        ImGui.SetCursorPosX(self.syncPropertyWidth)
+        self.syncArrangementIndex, _ = style.trackedCombo(nil, "##syncArrangement", self.syncArrangementIndex, labels, style.getMaxWidth(300), {
+            tooltip = "Where the pair stands relative to each other. The workspot authors one placement per synced\nanimation, and the count is how many pairs the shipped game places that way."
+        })
+    end
+
+    local arrangement = partner.arrangements[self.syncArrangementIndex + 1]
+
+    -- Nothing in the workspot says which half leads, so the shipped majority is only a default.
+    local suggestedLeads, observed = workspotSync.doesSelfLead(partner)
+    if self.syncMasterIsSelf == nil then
+        self.syncMasterIsSelf = suggestedLeads
+    end
+
+    style.mutedText("Master Is")
+    ImGui.SameLine()
+    ImGui.SetCursorPosX(self.syncPropertyWidth)
+    local masterIndex = self.syncMasterIsSelf and 0 or 1
+    local masterChanged
+    masterIndex, masterChanged = style.trackedCombo(nil, "##syncMaster", masterIndex, { "This spot", "The new spot" }, style.getMaxWidth(300), {
+        tooltip = observed > 0
+            and string.format("Which spot the other one is the child of. The shipped game pairs these two this way\n%d time(s); nothing in the workspot itself says which half leads.", observed)
+            or "Which spot the other one is the child of. No shipped placement of this pair sets masterNodeRef,\nso this is a guess - either direction works."
+    })
+    if masterChanged then
+        self.syncMasterIsSelf = masterIndex == 0
+    end
+
+    style.mutedText(string.format("Offset  x %.2f  y %.2f  z %.2f  yaw %.1f°",
+        arrangement.offset[1], arrangement.offset[2], arrangement.offset[3], arrangement.offset[4]))
+    style.tooltip("Position and rotation of the complementary spot, in this spot's local space.")
+
+    if ImGui.Button("Spawn Complementary Spot") then
+        local success, status = self:spawnComplementarySpot(partner, arrangement, self.syncMasterIsSelf)
+        self.syncStatus = status
+        if success then
+            ImGui.ShowToast(ImGui.Toast.new(ImGui.ToastType.Success, 2500, status))
+        end
+    end
+    style.tooltip(self.syncMasterIsSelf
+        and "Add the second spot of this pair next to this one, placed at the offset above and made\nthe child of this spot."
+        or "Add the second spot of this pair next to this one, placed at the offset above, and make\nthis spot its child.")
+
+    if self.syncStatus ~= "" then
+        style.mutedText(self.syncStatus)
+    end
+
+    ImGui.TreePop()
+end
+
 function aiSpot:draw()
     visualized.draw(self)
 
@@ -1948,6 +2175,38 @@ function aiSpot:draw()
     ImGui.SetCursorPosX(self.maxPropertyWidth)
     self.isWorkspotStatic, _ = style.trackedCheckbox(self.object, "##isWorkspotStatic", self.isWorkspotStatic)
 
+    self:drawSyncedPair()
+
+    local masterOpen = ImGui.TreeNodeEx("Master Spot", ImGuiTreeNodeFlags.SpanFullWidth)
+    style.tooltip("Makes this spot the child of another one, which is how a synced workspot pairs two NPCs.\nUse the workspot pair that names one side master or npc1 and the other child or npc2, and point the child at the master.\nNothing is exported while no master spot is set.")
+    if masterOpen then
+        if not self.masterPropertyWidth then
+            self.masterPropertyWidth = utils.getTextMaxWidth({ "Master Spot", "Enabled While Occupied" }) + 2 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
+        end
+
+        style.mutedText("Master Spot")
+        ImGui.SameLine()
+        ImGui.SetCursorPosX(self.masterPropertyWidth)
+        self.masterNodeRef, _ = registry.drawNodeRefSelector(math.max(120, style.getMaxWidth(250) - 40), self.masterNodeRef, self.object, true, {
+            id = "##masterNodeRef",
+            modulePath = "ai/aiSpot",
+            hint = "$/#ai_spot",
+            listHeight = 140,
+            emptyListText = "No other AI Spot with a NodeRef in this project.",
+            tooltip = "The spot this one is the child of, used by synced workspots where two NPCs act together.\nOnly AI Spots that have a NodeRef are listed, a spot without one can not be referenced."
+        })
+
+        style.mutedText("Enabled While Occupied")
+        ImGui.SameLine()
+        ImGui.SetCursorPosX(self.masterPropertyWidth)
+        ImGui.BeginDisabled(self.masterNodeRef == "")
+        self.enabledWhenMasterOccupied, _ = style.trackedCheckbox(self.object, "##enabledWhenMasterOccupied", self.enabledWhenMasterOccupied)
+        ImGui.EndDisabled()
+        style.tooltip("If checked, this spot stays available to other NPCs while the master spot is taken.\nAlmost every shipped child spot leaves this off, so the pair is used by one NPC couple at a time.", ImGuiHoveredFlags.AllowWhenDisabled)
+
+        ImGui.TreePop()
+    end
+
     if ImGui.Button("Add To Community") then
         self.communityAttachStatus = ""
         self.communityAttachMarkingSearch = ""
@@ -2048,23 +2307,35 @@ function aiSpot:export()
         })
     end
 
+    local spot = {
+        ["$type"] = "AIActionSpot",
+        ["resource"] = {
+            ["DepotPath"] = {
+                ["$type"] = "ResourcePath",
+                ["$storage"] = "string",
+                ["$value"] = self.spawnData
+            },
+            ["Flags"] = "Soft"
+        }
+    }
+
+    -- An empty NodeRef would still hash, so the master pair is only written once one is picked.
+    if self.masterNodeRef ~= "" then
+        spot["masterNodeRef"] = {
+            ["$type"] = "NodeRef",
+            ["$storage"] = "string",
+            ["$value"] = self.masterNodeRef
+        }
+        spot["enabledWhenMasterOccupied"] = self.enabledWhenMasterOccupied and 1 or 0
+    end
+
     local data = visualized.export(self)
     data.type = "worldAISpotNode"
     data.data = {
         ["isWorkspotInfinite"] = self.isWorkspotInfinite and 1 or 0,
         ["isWorkspotStatic"] = self.isWorkspotStatic and 1 or 0,
         ["spot"] = {
-            ["Data"] = {
-                ["$type"] = "AIActionSpot",
-                ["resource"] = {
-                    ["DepotPath"] = {
-                        ["$type"] = "ResourcePath",
-                        ["$storage"] = "string",
-                        ["$value"] = self.spawnData
-                    },
-                    ["Flags"] = "Soft"
-                }
-            }
+            ["Data"] = spot
         },
         ["markings"] = markings
     }

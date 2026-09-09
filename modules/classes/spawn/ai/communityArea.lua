@@ -8,6 +8,7 @@ local builder = require("modules/utils/game/entityBuilder")
 local Cron = require("modules/utils/vendor/Cron")
 
 local characterRecords = nil
+local voiceTags = nil
 local pendingAppearanceLoads = {}
 --local HIERARCHY_ROW_BG_PERIOD = 0x991C2B3A
 --local HIERARCHY_ROW_BG_PHASE = 0x991F3424
@@ -19,6 +20,84 @@ local HIERARCHY_ROW_TOP_PADDING = 2
 local HIERARCHY_COLOR_PERIOD = 0xFF377fcd
 local HIERARCHY_COLOR_PHASE = 0xFF48c731
 local HIERARCHY_COLOR_ENTRY = 0xFFb7692d
+---Area types of `worldCommunityRegistryItemAreaNodeType`, in enum order. `Count` is not authorable.
+local AREA_TYPES = { "Regular", "Streamable", "Background" }
+local AREA_TYPE_LABELS = { "Quest (Regular)", "Streamable", "Background" }
+---Node class each area type is paired with. Vanilla never mixes these up.
+local AREA_TYPE_NODES = {
+    Regular = "worldCompiledCommunityAreaNode",
+    Streamable = "worldCompiledCommunityAreaNode_Streamable",
+    Background = "worldCompiledCommunityAreaNode_Streamable"
+}
+local DEFAULT_AREA_TYPE = "Streamable"
+local AREA_TYPE_TOOLTIP = "Quest (Regular): the area node is moved into the project's always loaded sector on export, so the community never streams out. Entries usually start inactive and get switched on by a script or questphase.\n\nStreamable: the area node streams in and out with the sector it sits in. The default for a placed scene.\n\nBackground: same node as Streamable, meant for ambient population that changes over the day. Time periods with a quantity of 0 are the normal way to empty a place at certain hours."
+
+---Initializer kinds of `communitySpawnEntry.initializers`.
+local INITIALIZER_KINDS = { "voiceTag", "patrol", "squad" }
+local INITIALIZER_LABELS = { voiceTag = "Voice Tag", patrol = "Patrol", squad = "Squad" }
+local INITIALIZER_ICONS = { voiceTag = IconGlyphs.AccountVoice, patrol = IconGlyphs.MapMarkerPath, squad = IconGlyphs.AccountGroupOutline }
+local INITIALIZER_TOOLTIPS = {
+    voiceTag = "Overrides the voice tag of the character record, so this entry's NPCs use a different voice.",
+    patrol = "Sends this entry's NPCs along a Patrol Spline instead of leaving them at their spots.",
+    squad = "Puts this entry's NPCs in a squad, so they fight and react as one group."
+}
+local INITIALIZER_PRESENT_TOOLTIP = "This entry already has one."
+local MOVEMENT_TYPES = { "Walk", "Run", "Sprint", "Strafe", "Stand" }
+local CONTINUATION_POLICIES = { "FromNextControlPoint", "FromClosestPoint", "FromBeginning" }
+local DEFAULT_PATROL_ACTION = "PatrolActions.DefaultPatrolAction"
+---`AIPatrolPathParameters.path` points at a worldPatrolSplineNode, so the picker only offers those.
+local PATROL_SPLINE_MODULE_PATH = "meta/patrolSpline"
+---`patrolAction` takes a `gamedataAIActionSmartComposite_Record`, so this lists only the composites
+---that actually run something. The leaf `gamedataAIAction_Record`s of the same namespace
+---(`PatrolActions.Scan`, `ScanShort`, `ScanSpot`) are nodes inside these and are not valid here,
+---and `AIPatrolActionComposite` / `AIPatrolSpotActionComposite` are empty base templates.
+local PATROL_ACTIONS = {
+    "PatrolActions.DefaultPatrolAction",
+    "PatrolActions.DroneScan",
+    "PatrolActions.DroneScanShort",
+    "PatrolActions.DroneScanSpot",
+    "DroneArchetype.DefaultPatrolAction",
+    "DroneBombusArchetype.DefaultPatrolAction",
+    "DroneBombusFastArchetype.DefaultPatrolAction",
+    "DroneBombusSlowArchetype.DefaultPatrolAction",
+    "DroneBombusSuicideArchetype.DefaultPatrolAction",
+    "DroneGriffinArchetype.DefaultPatrolAction",
+    "DroneOctantArchetype.DefaultPatrolAction"
+}
+local PATROL_ACTION_TOOLTIP = "Action played at each patrol point.\nDefaultPatrolAction just walks the path and is what almost every shipped patrol uses.\nThe scan and drone variants add a look around and are meant for drones.\nType a TweakDBID and choose 'Use custom: ...' for your own record."
+
+---`communityESquadType`, in enum order. `Unknown` is the engine's fallback and is not authorable.
+local SQUAD_TYPES = { "Global", "Community", "Security" }
+---Squad type determines what `value` names: `Community` takes a `FactionSquads.*` record,
+---`Security` takes a security area name. Both shipped initializers carry exactly one entry.
+local DEFAULT_SQUAD_TYPE = 1
+local DEFAULT_SQUAD_NAME = "FactionSquads.GenericSquad"
+---Every `gamedataSquad_Record` of the `FactionSquads` namespace, minus the two `_inline0` sub-records.
+local FACTION_SQUADS = {
+    "FactionSquads.AfterlifeMercsSquad",
+    "FactionSquads.AldecadosSquad",
+    "FactionSquads.AnimalsSquad",
+    "FactionSquads.ArasakaSquad",
+    "FactionSquads.DronesSquad",
+    "FactionSquads.GenericSquad",
+    "FactionSquads.KangTaoSquad",
+    "FactionSquads.KurtzSquad",
+    "FactionSquads.MaelstromSquad",
+    "FactionSquads.MilitechSquad",
+    "FactionSquads.NCPDSquad",
+    "FactionSquads.ScavengersSquad",
+    "FactionSquads.SecuritySquad",
+    "FactionSquads.SixthStreetSquad",
+    "FactionSquads.TheMoxSquad",
+    "FactionSquads.TraumaTeamSquad",
+    "FactionSquads.TygerClawsSquad",
+    "FactionSquads.ValentinosSquad",
+    "FactionSquads.VoodooBoysSquad",
+    "FactionSquads.WraithsSquad"
+}
+local SQUAD_TYPE_TOOLTIP = "Global: one squad shared by the whole world.\nCommunity: a squad of this community, named by a FactionSquads record. This is what a placed group of NPCs wants.\nSecurity: joins the squad of a security area, named by that area."
+local SQUAD_NAME_TOOLTIP = "Squad the NPCs join.\nA Community squad is a FactionSquads record, which also sets their faction and how they fight.\nFor a Security squad, type the name of the security area instead."
+
 local PERIOD_HOUR_USED_TOOLTIP = "Already used by another time period of this phase.\nA phase can not have two time periods for the same hour."
 local PERIOD_HOUR_DUPLICATE_TOOLTIP = "This hour is used by another time period of this phase.\nOnly one of them will be used by the game, pick a different hour."
 local PERIOD_HOURS_EXHAUSTED_TOOLTIP = "This phase already uses every available time period."
@@ -47,6 +126,90 @@ local function ensureCharacterRecordsLoaded()
 
     file:close()
     table.sort(characterRecords)
+end
+
+---Voice tags collected from every shipped community initializer and character record.
+local function ensureVoiceTagsLoaded()
+    if voiceTags ~= nil then
+        return
+    end
+
+    voiceTags = {}
+    local file = io.open("data/static/community_voice_tags.txt", "r")
+    if not file then
+        return
+    end
+
+    for line in file:lines() do
+        local tag = sanitizeValue(line)
+        if tag ~= "" then
+            table.insert(voiceTags, tag)
+        end
+    end
+
+    file:close()
+    table.sort(voiceTags)
+end
+
+---@param kind string
+---@return table
+local function createInitializer(kind)
+    if kind == "patrol" then
+        -- Defaults are the dominant shipped values, which are also the engine defaults of
+        -- AIPatrolPathParameters. `patrolWithWeapon` is the one near even split (265 / 199).
+        return {
+            type = "patrol",
+            path = "",
+            movementType = 0,
+            continuationPolicy = 0,
+            startFromClosestPoint = true,
+            patrolWithWeapon = false,
+            isBackAndForth = true,
+            isInfinite = true,
+            numberOfLoops = 1,
+            sortPatrolPoints = true,
+            patrolAction = DEFAULT_PATROL_ACTION
+        }
+    end
+
+    if kind == "squad" then
+        return { type = "squad", squadType = DEFAULT_SQUAD_TYPE, squadName = DEFAULT_SQUAD_NAME }
+    end
+
+    return { type = "voiceTag", voiceTagName = "" }
+end
+
+---@param initializer table
+---@return table
+local function normalizeInitializer(initializer)
+    if type(initializer) ~= "table" then
+        return createInitializer("voiceTag")
+    end
+
+    if initializer.type == "squad" then
+        initializer.squadType = math.min(#SQUAD_TYPES - 1, math.max(0, math.floor(tonumber(initializer.squadType) or DEFAULT_SQUAD_TYPE)))
+        initializer.squadName = sanitizeValue(initializer.squadName)
+        return initializer
+    end
+
+    if initializer.type ~= "patrol" then
+        initializer.type = "voiceTag"
+        initializer.voiceTagName = sanitizeValue(initializer.voiceTagName)
+        return initializer
+    end
+
+    initializer.path = sanitizeValue(initializer.path)
+    initializer.movementType = math.floor(tonumber(initializer.movementType) or 0)
+    initializer.continuationPolicy = math.floor(tonumber(initializer.continuationPolicy) or 0)
+    initializer.startFromClosestPoint = initializer.startFromClosestPoint ~= false
+    initializer.patrolWithWeapon = initializer.patrolWithWeapon == true
+    initializer.isBackAndForth = initializer.isBackAndForth ~= false
+    initializer.isInfinite = initializer.isInfinite ~= false
+    initializer.numberOfLoops = math.max(1, math.floor(tonumber(initializer.numberOfLoops) or 1))
+    initializer.sortPatrolPoints = initializer.sortPatrolPoints ~= false
+    initializer.patrolAction = sanitizeValue(initializer.patrolAction, DEFAULT_PATROL_ACTION)
+
+    return initializer
 end
 
 local function copyList(values)
@@ -321,8 +484,16 @@ local function requestCharacterAppearances(recordID)
     return { "default" }, false
 end
 
----Class for worldCompiledCommunityAreaNode_Streamable
+---Resolve a stored area type to a supported one.
+---@param areaType any
+---@return string
+local function resolveAreaType(areaType)
+    return AREA_TYPE_NODES[areaType] ~= nil and areaType or DEFAULT_AREA_TYPE
+end
+
+---Class for worldCompiledCommunityAreaNode / worldCompiledCommunityAreaNode_Streamable
 ---@class community : visualized
+---@field areaType string
 ---@field entries table
 ---@field periodEnums table
 ---@field periodLinkMode table<string, string>
@@ -339,7 +510,8 @@ function community:new()
     o.dataType = "Community"
     o.spawnDataPath = "data/spawnables/ai/community/"
     o.modulePath = "ai/communityArea"
-    o.node = "worldCompiledCommunityAreaNode_Streamable"
+    -- Decided by `areaType`, kept in sync by loadSpawnData and the Area Type selector.
+    o.node = AREA_TYPE_NODES[DEFAULT_AREA_TYPE]
     o.description = "A collection of NPCs, with their phases, time periods and assigned spots."
     o.icon = IconGlyphs.AccountGroup
 
@@ -349,9 +521,14 @@ function community:new()
     o.primaryRange = 250
     o.streamingMultiplier = 5
 
+    o.areaType = DEFAULT_AREA_TYPE
+
     o.entries = {}
     o.entryRecordSearch = {}
     o.phaseAppearanceSearch = {}
+    o.initializerVoiceSearch = {}
+    o.initializerActionSearch = {}
+    o.initializerSquadSearch = {}
     o.periodLinkMode = {}
     o.hierarchyOpen = {}
     o.hierarchyBaseCursorX = nil
@@ -392,9 +569,51 @@ function community:new()
    	return o
 end
 
+function community:loadSpawnData(data, position, rotation)
+    visualized.loadSpawnData(self, data, position, rotation)
+
+    -- The payload is shared with long lived tables (spawn list entry, clipboard, project cache),
+    -- so the nested entry tree must not be aliased into this spawnable.
+    self.entries = utils.deepcopy(self.entries or {})
+    self.areaType = resolveAreaType(self.areaType)
+    -- `node` is a class identity key and never restored from the payload, so it is derived here.
+    self.node = self:getNodeType()
+end
+
+---Node class this community exports as, decided by its area type.
+---@return string
+function community:getNodeType()
+    return AREA_TYPE_NODES[self.areaType] or AREA_TYPE_NODES[DEFAULT_AREA_TYPE]
+end
+
+---@return string
+function community:getAreaType()
+    return resolveAreaType(self.areaType)
+end
+
+---Whether the area node belongs in the project's always loaded sector instead of its own one.
+---@return boolean
+function community:isAlwaysLoadedHosted()
+    return self:getAreaType() == "Regular"
+end
+
+---Default `entryActiveOnStart` for a new entry. Quest communities are switched on by a script or
+---questphase, the other two carry ambient NPCs that are there from the start.
+---@return boolean
+function community:getDefaultEntryActiveOnStart()
+    return not self:isAlwaysLoadedHosted()
+end
+
+---Default `alwaysSpawned` for a new phase. Only quest communities use it in shipped data.
+---@return boolean
+function community:getDefaultAlwaysSpawned()
+    return self:isAlwaysLoadedHosted()
+end
+
 function community:save()
     local data = visualized.save(self)
 
+    data.areaType = self:getAreaType()
     data.entries = utils.deepcopy(self.entries)
 
     return data
@@ -635,6 +854,261 @@ function community:drawPhaseAppearances(entryKey, phaseKey, entry, phase)
     ImGui.Unindent(hierarchyIndent())
 end
 
+---@param entryKey any
+---@param key any
+---@param initializer table
+---@return boolean deleteRequested
+function community:drawVoiceTagInitializer(entryKey, key, initializer)
+    ensureVoiceTagsLoaded()
+
+    style.mutedText(INITIALIZER_ICONS.voiceTag)
+    style.tooltip(INITIALIZER_TOOLTIPS.voiceTag)
+    ImGui.SameLine()
+
+    local searchKey = string.format("%s|%s", tostring(entryKey), tostring(key))
+    local search = self.initializerVoiceSearch[searchKey] or ""
+    local options = buildSelectorOptions(voiceTags, initializer.voiceTagName)
+    initializer.voiceTagName, search, _ = style.trackedSearchDropdown(
+        "##voiceTagName",
+        "Search voice tag...",
+        initializer.voiceTagName,
+        search,
+        options,
+        {
+            element = self.object,
+            width = math.max(140, style.getMaxWidth(260) - 40),
+            matchContentWidth = true,
+            allowCustom = true,
+            tooltip = "Voice tag this entry's NPCs speak with, e.g. civ_low_m_46_afam_40.\nType one and choose 'Use custom: ...' for a tag that is not listed."
+        }
+    )
+    self.initializerVoiceSearch[searchKey] = search
+
+    ImGui.SameLine()
+    local deleteRequested = style.dangerButton(IconGlyphs.DeleteOutline .. "##deleteInitializer")
+    style.tooltip("Delete")
+
+    return deleteRequested
+end
+
+---@param entryKey any
+---@param key any
+---@param initializer table
+---@return boolean deleteRequested
+function community:drawPatrolInitializer(entryKey, key, initializer)
+    style.mutedText(INITIALIZER_ICONS.patrol)
+    style.tooltip(INITIALIZER_TOOLTIPS.patrol)
+    ImGui.SameLine()
+
+    initializer.path, _ = registry.drawNodeRefSelector(math.max(120, style.getMaxWidth(260) - 80), initializer.path, self.object, true, {
+        id = "##patrolPath",
+        modulePath = PATROL_SPLINE_MODULE_PATH,
+        hint = "$/#patrol_spline",
+        listHeight = 140,
+        emptyListText = "No Patrol Spline with a NodeRef in this project.",
+        tooltip = "Patrol Spline the NPCs walk. Only Patrol Splines that have a NodeRef are listed, a spline without one can not be referenced."
+    })
+    ImGui.SameLine()
+
+    if drawIconActionButton(IconGlyphs.CogOutline, "patrolSettings", nil) then
+        ImGui.OpenPopup("##patrolSettingsPopup")
+    end
+    style.tooltip(string.format(
+        "Movement Type: %s\nPatrol Action: %s\nWith Weapon: %s\nBack And Forth: %s\nInfinite: %s",
+        MOVEMENT_TYPES[initializer.movementType + 1] or MOVEMENT_TYPES[1],
+        initializer.patrolAction ~= "" and initializer.patrolAction or DEFAULT_PATROL_ACTION,
+        initializer.patrolWithWeapon and "true" or "false",
+        initializer.isBackAndForth and "true" or "false",
+        initializer.isInfinite and "true" or "false"
+    ))
+
+    style.constrainPopupToViewport("##patrolSettingsPopup")
+    if ImGui.BeginPopup("##patrolSettingsPopup") then
+        local labels = {
+            "Movement Type", "Continuation Policy", "Patrol Action", "Start From Closest Point",
+            "Patrol With Weapon", "Back And Forth", "Infinite", "Number Of Loops", "Sort Patrol Points"
+        }
+        local controlX = ImGui.GetCursorPosX() + utils.getTextMaxWidth(labels) + 2 * ImGui.GetStyle().ItemSpacing.x
+        local function drawLabel(label)
+            ImGui.AlignTextToFramePadding()
+            style.mutedText(label)
+            ImGui.SameLine()
+            ImGui.SetCursorPosX(controlX)
+        end
+
+        drawLabel("Movement Type")
+        initializer.movementType, _ = style.trackedCombo(self.object, "##movementType", initializer.movementType, MOVEMENT_TYPES, 160, {
+            tooltip = "Speed the NPCs move along the path at."
+        })
+
+        drawLabel("Continuation Policy")
+        initializer.continuationPolicy, _ = style.trackedCombo(self.object, "##continuationPolicy", initializer.continuationPolicy, CONTINUATION_POLICIES, 160, {
+            tooltip = "Where the NPCs resume the path after being interrupted."
+        })
+
+        drawLabel("Patrol Action")
+        local actionSearchKey = string.format("%s|%s", tostring(entryKey), tostring(key))
+        local actionSearch = self.initializerActionSearch[actionSearchKey] or ""
+        initializer.patrolAction, actionSearch, _ = style.trackedSearchDropdown(
+            "##patrolAction",
+            "Search patrol action...",
+            initializer.patrolAction,
+            actionSearch,
+            buildSelectorOptions(PATROL_ACTIONS, initializer.patrolAction),
+            {
+                element = self.object,
+                width = 260,
+                matchContentWidth = true,
+                allowCustom = true,
+                tooltip = PATROL_ACTION_TOOLTIP
+            }
+        )
+        self.initializerActionSearch[actionSearchKey] = actionSearch
+
+        drawLabel("Start From Closest Point")
+        style.tooltip("If true, the NPCs join the path at the point nearest to them instead of at its start.")
+        initializer.startFromClosestPoint, _ = style.trackedCheckbox(self.object, "##startFromClosestPoint", initializer.startFromClosestPoint)
+
+        drawLabel("Patrol With Weapon")
+        style.tooltip("If true, the NPCs walk the path with their weapon drawn.")
+        initializer.patrolWithWeapon, _ = style.trackedCheckbox(self.object, "##patrolWithWeapon", initializer.patrolWithWeapon)
+
+        drawLabel("Back And Forth")
+        style.tooltip("If true, the NPCs walk the path back to its start instead of looping around to it.")
+        initializer.isBackAndForth, _ = style.trackedCheckbox(self.object, "##isBackAndForth", initializer.isBackAndForth)
+
+        drawLabel("Infinite")
+        style.tooltip("If true, the NPCs keep patrolling for as long as they are spawned.")
+        initializer.isInfinite, _ = style.trackedCheckbox(self.object, "##isInfinite", initializer.isInfinite)
+
+        drawLabel("Number Of Loops")
+        ImGui.BeginDisabled(initializer.isInfinite)
+        local loopsChanged
+        initializer.numberOfLoops, loopsChanged = style.trackedIntInput(self.object, "##numberOfLoops", initializer.numberOfLoops, 1, 9999999, 85, 1, 10)
+        if loopsChanged then
+            initializer.numberOfLoops = math.floor(initializer.numberOfLoops)
+        end
+        ImGui.EndDisabled()
+        style.tooltip("How many times the path is walked. Ignored while Infinite is on.", ImGuiHoveredFlags.AllowWhenDisabled)
+
+        drawLabel("Sort Patrol Points")
+        style.tooltip("If true, the patrol points are walked in the order of the spline instead of the order they were authored in.")
+        initializer.sortPatrolPoints, _ = style.trackedCheckbox(self.object, "##sortPatrolPoints", initializer.sortPatrolPoints)
+
+        ImGui.EndPopup()
+    end
+
+    ImGui.SameLine()
+    local deleteRequested = style.dangerButton(IconGlyphs.DeleteOutline .. "##deleteInitializer")
+    style.tooltip("Delete")
+
+    return deleteRequested
+end
+
+---@param entryKey any
+---@param key any
+---@param initializer table
+---@return boolean deleteRequested
+function community:drawSquadInitializer(entryKey, key, initializer)
+    style.mutedText(INITIALIZER_ICONS.squad)
+    style.tooltip(INITIALIZER_TOOLTIPS.squad)
+    ImGui.SameLine()
+
+    initializer.squadType, _ = style.trackedCombo(self.object, "##squadType", initializer.squadType, SQUAD_TYPES, 110, {
+        tooltip = SQUAD_TYPE_TOOLTIP
+    })
+    ImGui.SameLine()
+
+    local searchKey = string.format("%s|%s", tostring(entryKey), tostring(key))
+    local search = self.initializerSquadSearch[searchKey] or ""
+    initializer.squadName, search, _ = style.trackedSearchDropdown(
+        "##squadName",
+        "Search squad...",
+        initializer.squadName,
+        search,
+        buildSelectorOptions(FACTION_SQUADS, initializer.squadName),
+        {
+            element = self.object,
+            width = math.max(140, style.getMaxWidth(260) - 150),
+            matchContentWidth = true,
+            allowCustom = true,
+            tooltip = SQUAD_NAME_TOOLTIP
+        }
+    )
+    self.initializerSquadSearch[searchKey] = search
+
+    ImGui.SameLine()
+    local deleteRequested = style.dangerButton(IconGlyphs.DeleteOutline .. "##deleteInitializer")
+    style.tooltip("Delete")
+
+    return deleteRequested
+end
+
+---@param entryKey any
+---@param entry table
+function community:drawEntryInitializers(entryKey, entry)
+    entry.initializers = entry.initializers or {}
+
+    -- Normalized up front, the add menu needs every kind before the first row is drawn.
+    local present = {}
+    for key, initializer in ipairs(entry.initializers) do
+        entry.initializers[key] = normalizeInitializer(initializer)
+        present[entry.initializers[key].type] = true
+    end
+
+    local header = style.resolveActionLabelNoIconOnly(IconGlyphs.Tune, "Initializers", nil)
+    drawSectionHeader(header, #entry.initializers)
+    ImGui.SameLine()
+    if ImGui.Button("+##addInitializer") then
+        ImGui.OpenPopup("##addInitializerPopup")
+    end
+    style.tooltip("Add an initializer, which overrides a property of the character record for this entry.")
+
+    style.constrainPopupToViewport("##addInitializerPopup")
+    if ImGui.BeginPopup("##addInitializerPopup") then
+        for _, kind in ipairs(INITIALIZER_KINDS) do
+            local exists = present[kind] == true
+            ImGui.BeginDisabled(exists)
+            if ImGui.MenuItem(INITIALIZER_ICONS[kind] .. " " .. INITIALIZER_LABELS[kind]) then
+                history.addAction(history.getElementChange(self.object))
+                table.insert(entry.initializers, createInitializer(kind))
+            end
+            ImGui.EndDisabled()
+            style.tooltip(exists and INITIALIZER_PRESENT_TOOLTIP or INITIALIZER_TOOLTIPS[kind], ImGuiHoveredFlags.AllowWhenDisabled)
+        end
+        ImGui.EndPopup()
+    end
+
+    ImGui.Indent(hierarchyIndent())
+    for key, _ in pairs(entry.initializers) do
+        ImGui.PushID(key)
+
+        local initializer = entry.initializers[key]
+
+        local deleteRequested
+        if initializer.type == "patrol" then
+            deleteRequested = self:drawPatrolInitializer(entryKey, key, initializer)
+        elseif initializer.type == "squad" then
+            deleteRequested = self:drawSquadInitializer(entryKey, key, initializer)
+        else
+            deleteRequested = self:drawVoiceTagInitializer(entryKey, key, initializer)
+        end
+
+        ImGui.PopID()
+
+        if deleteRequested then
+            history.addAction(history.getElementChange(self.object))
+            table.remove(entry.initializers, key)
+            local searchKey = string.format("%s|%s", tostring(entryKey), tostring(key))
+            self.initializerVoiceSearch[searchKey] = nil
+            self.initializerActionSearch[searchKey] = nil
+            self.initializerSquadSearch[searchKey] = nil
+            break
+        end
+    end
+    ImGui.Unindent(hierarchyIndent())
+end
+
 function community:drawSpotNodeRefs(period)
     period.spotNodeRefs = period.spotNodeRefs or {}
 
@@ -760,7 +1234,7 @@ function community:drawPeriod(periods, periodKey, periodHierarchyKey)
         if changed then
             period.quantity = math.floor(period.quantity)
         end
-        style.tooltip("Quantity: " .. tostring(period.quantity) .. "\nNumber of NPC slots active during this time period.")
+        style.tooltip("Quantity: " .. tostring(period.quantity) .. "\nNumber of NPC slots active during this time period.\nSet it to 0 to have nobody spawn during this period, which is how a place is left empty at certain hours.")
     else
         style.drawIconLabelRow(nil, string.format("[%d] %s", periodKey, periodLabel))
         if isDuplicateHour then
@@ -886,7 +1360,7 @@ function community:drawPhases(entryKey, entry, entryHierarchyKey)
         table.insert(entry.phases, {
             phaseName = getUniqueName(entry.phases, "phaseName", string.format("phase_%d", nextPhaseIndex)),
             appearances = { "default" },
-            alwaysSpawned = false,
+            alwaysSpawned = self:getDefaultAlwaysSpawned(),
             timePeriods = {}
         })
     end
@@ -898,7 +1372,12 @@ function community:drawPhases(entryKey, entry, entryHierarchyKey)
         phase.appearances = phase.appearances or { "default" }
         phase.timePeriods = phase.timePeriods or {}
         phase.phaseName = sanitizeValue(phase.phaseName)
-        phase.alwaysSpawned = phase.alwaysSpawned == true
+        -- Only an absent value falls back to the area type's default, so an authored one is kept.
+        if phase.alwaysSpawned == nil then
+            phase.alwaysSpawned = self:getDefaultAlwaysSpawned()
+        else
+            phase.alwaysSpawned = phase.alwaysSpawned == true
+        end
         self:drawHierarchyRowBackground("phase")
 
         local phaseHierarchyKey = entryHierarchyKey .. "/phase:" .. tostring(phase)
@@ -1009,8 +1488,9 @@ function community:drawEntries()
             entryName = getUniqueName(self.entries, "entryName", string.format("entry_%d", nextEntryIndex)),
             characterRecordId = "Character.Judy",
             initialPhaseName = "default",
-            entryActiveOnStart = true,
+            entryActiveOnStart = self:getDefaultEntryActiveOnStart(),
             spawnInView = true,
+            initializers = {},
             phases = {}
         })
     end
@@ -1025,7 +1505,13 @@ function community:drawEntries()
         entry.entryName = sanitizeValue(entry.entryName)
         entry.characterRecordId = sanitizeValue(entry.characterRecordId)
         entry.initialPhaseName = sanitizeValue(entry.initialPhaseName)
-        entry.entryActiveOnStart = entry.entryActiveOnStart ~= false
+        entry.initializers = entry.initializers or {}
+        -- Only an absent value falls back to the area type's default, so an authored one is kept.
+        if entry.entryActiveOnStart == nil then
+            entry.entryActiveOnStart = self:getDefaultEntryActiveOnStart()
+        else
+            entry.entryActiveOnStart = entry.entryActiveOnStart ~= false
+        end
         entry.spawnInView = entry.spawnInView ~= false
         local phaseOptions, defaultInitialPhase, phaseNames = buildInitialPhaseOptions(entry.phases)
         if #phaseNames == 0 then
@@ -1171,6 +1657,14 @@ function community:drawEntries()
             self.entryRecordSearch[entryKey] = nil
             self.entryInitialPhaseSearch[entryKey] = nil
             self.entryInitialPhaseTouched[entryKey] = nil
+            local searchPrefix = entryKey .. "|"
+            for _, searchState in ipairs({ self.initializerVoiceSearch, self.initializerActionSearch, self.initializerSquadSearch }) do
+                for searchKey in pairs(searchState) do
+                    if searchKey:sub(1, #searchPrefix) == searchPrefix then
+                        searchState[searchKey] = nil
+                    end
+                end
+            end
             ImGui.PopID()
             break
         end
@@ -1178,6 +1672,8 @@ function community:drawEntries()
         if entryOpen then
             ImGui.Indent(hierarchyIndent())
             ImGui.Dummy(0, 4 * style.viewSize)
+            self:drawEntryInitializers(key, entry)
+            ImGui.Dummy(0, 8 * style.viewSize)
             self:drawPhases(key, entry, entryHierarchyKey)
             ImGui.Dummy(0, 4 * style.viewSize)
             ImGui.Unindent(hierarchyIndent())
@@ -1192,9 +1688,22 @@ end
 function community:draw()
     visualized.draw(self)
 
-    local x = utils.getTextMaxWidth({"Visualize position", "CommunityID (NodeRef)"}) + 4 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
+    local x = utils.getTextMaxWidth({"Visualize position", "CommunityID (NodeRef)", "Area Type"}) + 4 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
     self:drawPreviewCheckbox("Visualize position", x)
     style.tooltip("Preview a sphere, to make the community selectable in editor mode.")
+
+    style.mutedText("Area Type")
+    ImGui.SameLine()
+    ImGui.SetCursorPosX(x)
+    local areaIndex = math.max(0, utils.indexValue(AREA_TYPES, self:getAreaType()) - 1)
+    local areaChanged
+    areaIndex, areaChanged = style.trackedCombo(self.object, "##communityAreaType", areaIndex, AREA_TYPE_LABELS, 150, {
+        tooltip = AREA_TYPE_TOOLTIP
+    })
+    if areaChanged then
+        self.areaType = AREA_TYPES[areaIndex + 1] or DEFAULT_AREA_TYPE
+        self.node = self:getNodeType()
+    end
 
     style.mutedText("CommunityID (NodeRef)")
     ImGui.SameLine()
@@ -1280,7 +1789,7 @@ function community:export()
     end
 
     local data = visualized.export(self)
-    data.type = "worldCompiledCommunityAreaNode_Streamable"
+    data.type = self:getNodeType()
     data.data = {
         ["sourceObjectId"] = {
             ["$type"] = "entEntityID",
@@ -1293,6 +1802,12 @@ function community:export()
             }
         }
     }
+
+    -- Only the streamable node class has this property, and every shipped one sets it. Left unset
+    -- it defaults to 0 and the community never streams in.
+    if data.type == "worldCompiledCommunityAreaNode_Streamable" then
+        data.data["streamingDistance"] = self.primaryRange
+    end
 
     return data
 end

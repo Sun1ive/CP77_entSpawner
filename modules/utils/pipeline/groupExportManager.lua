@@ -193,12 +193,18 @@ local function registerGroupContribution(runtime, group, contribution)
     }
 end
 
+---Node classes a community spawnable can export as, decided by its area type.
+local COMMUNITY_AREA_NODE_TYPES = {
+    ["worldCompiledCommunityAreaNode"] = true,
+    ["worldCompiledCommunityAreaNode_Streamable"] = true
+}
+
 local function appendCommunityState(target, communities, sector)
     local sectorCommunities = {}
     local sectorCommunitiesByRef = {}
 
     for _, node in ipairs(sector and sector.nodes or {}) do
-        if node and node.type == "worldCompiledCommunityAreaNode_Streamable" then
+        if node and COMMUNITY_AREA_NODE_TYPES[node.type] then
             table.insert(sectorCommunities, node)
 
             local nodeRef = tostring(node.nodeRef or "")
@@ -230,12 +236,46 @@ local function appendCommunityState(target, communities, sector)
             end
         end
 
-        canonicalNode = canonicalNode or sectorCommunities[index]
+        -- The positional fallback only holds while every community of the group is still in its
+        -- own sector. An always loaded hosted one was moved out by the previous export, so matching
+        -- it by index would bind it to an unrelated community's node.
+        if not canonicalNode and not community.hostedInAlwaysLoaded then
+            canonicalNode = sectorCommunities[index]
+        end
         if canonicalNode then
             stateCommunity.node = canonicalNode
         end
 
         table.insert(target, stateCommunity)
+    end
+end
+
+---Move the area nodes of `Regular` communities out of their own sector and into the always loaded
+---one, which is where every shipped `Regular` community keeps its node. A node that is not found
+---is one a previous export already moved, restored from the sidecar, so it is only added.
+---@param project table
+---@param communities table
+---@param alwaysLoaded table
+local function hostAlwaysLoadedCommunities(project, communities, alwaysLoaded)
+    if type(alwaysLoaded) ~= "table" or type(alwaysLoaded.nodes) ~= "table" then
+        return
+    end
+
+    for _, community in ipairs(communities or {}) do
+        local node = community.hostedInAlwaysLoaded and community.node or nil
+
+        if type(node) == "table" then
+            for _, sector in ipairs(project.sectors or {}) do
+                for index, sectorNode in ipairs(sector.nodes or {}) do
+                    if sectorNode == node then
+                        table.remove(sector.nodes, index)
+                        break
+                    end
+                end
+            end
+
+            table.insert(alwaysLoaded.nodes, node)
+        end
     end
 end
 
@@ -701,6 +741,8 @@ local function finalizeExportRuntime(runtime)
             end
 
             if alwaysLoaded then
+                -- Before the sector joins the project, so the move never has to skip it.
+                hostAlwaysLoadedCommunities(runtime.project, runtime.state.communities, alwaysLoaded)
                 table.insert(runtime.project.sectors, alwaysLoaded)
             end
 
@@ -952,8 +994,13 @@ beginNextGroup = function (runtime)
 
                             if object.ref.spawnable.node == "worldDeviceNode" then
                                 runtime.request.handleDevice(object, exportCurrent.devices, exportCurrent.psEntries, exportCurrent.childs, exportCurrent.nodeRefMap)
-                            elseif object.ref.spawnable.node == "worldCompiledCommunityAreaNode_Streamable" then
-                                table.insert(exportCurrent.communities, { data = object.ref.spawnable.entries, node = exportCurrent.exported.nodes[#exportCurrent.exported.nodes] })
+                            elseif COMMUNITY_AREA_NODE_TYPES[object.ref.spawnable.node] then
+                                table.insert(exportCurrent.communities, {
+                                    data = object.ref.spawnable.entries,
+                                    node = exportCurrent.exported.nodes[#exportCurrent.exported.nodes],
+                                    areaType = object.ref.spawnable:getAreaType(),
+                                    hostedInAlwaysLoaded = object.ref.spawnable:isAlwaysLoadedHosted()
+                                })
                             elseif object.ref.spawnable.node == "worldAISpotNode" then
                                 table.insert(exportCurrent.spotNodes, {
                                     ref = object.ref.spawnable.nodeRef,

@@ -1895,6 +1895,86 @@ local function buildMarkingRefMap(spotNodes)
     return markingRefMap
 end
 
+---Build the `communitySpawnEntry.initializers` array.
+---@param initializers table?
+---@return table
+local function exportEntryInitializers(initializers)
+    local exported = {}
+    local movementTypes = utils.enumTable("moveMovementType")
+    local continuationPolicies = utils.enumTable("AIPatrolContinuationPolicy")
+    local squadTypes = utils.enumTable("communityESquadType")
+
+    for _, initializer in pairs(initializers or {}) do
+        if initializer.type == "patrol" then
+            table.insert(exported, {
+                ["Data"] = {
+                    ["$type"] = "communityPatrolInitializer",
+                    ["patrolRole"] = {
+                        ["Data"] = {
+                            ["$type"] = "AIPatrolRole",
+                            ["pathParams"] = {
+                                ["Data"] = {
+                                    ["$type"] = "AIPatrolPathParameters",
+                                    ["path"] = {
+                                        ["$type"] = "NodeRef",
+                                        ["$storage"] = "string",
+                                        ["$value"] = initializer.path or ""
+                                    },
+                                    ["movementType"] = movementTypes[(initializer.movementType or 0) + 1] or "Walk",
+                                    ["continuationPolicy"] = continuationPolicies[(initializer.continuationPolicy or 0) + 1] or "FromNextControlPoint",
+                                    ["startFromClosestPoint"] = initializer.startFromClosestPoint and 1 or 0,
+                                    ["patrolWithWeapon"] = initializer.patrolWithWeapon and 1 or 0,
+                                    ["isBackAndForth"] = initializer.isBackAndForth and 1 or 0,
+                                    ["isInfinite"] = initializer.isInfinite and 1 or 0,
+                                    ["numberOfLoops"] = math.max(1, math.floor(tonumber(initializer.numberOfLoops) or 1)),
+                                    ["sortPatrolPoints"] = initializer.sortPatrolPoints and 1 or 0,
+                                    ["patrolAction"] = {
+                                        ["$type"] = "TweakDBID",
+                                        ["$storage"] = "string",
+                                        ["$value"] = initializer.patrolAction or "PatrolActions.DefaultPatrolAction"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+        elseif initializer.type == "squad" then
+            -- `entries` is an array, but both shipped squad initializers hold exactly one entry
+            -- and only one is authorable here.
+            table.insert(exported, {
+                ["Data"] = {
+                    ["$type"] = "communitySquadInitializer",
+                    ["entries"] = {
+                        {
+                            ["$type"] = "communitySquadInitializerEntry",
+                            ["type"] = squadTypes[(initializer.squadType or 1) + 1] or "Community",
+                            ["value"] = {
+                                ["$type"] = "CName",
+                                ["$storage"] = "string",
+                                ["$value"] = initializer.squadName or ""
+                            }
+                        }
+                    }
+                }
+            })
+        else
+            table.insert(exported, {
+                ["Data"] = {
+                    ["$type"] = "communityVoiceTagInitializer",
+                    ["voiceTagName"] = {
+                        ["$type"] = "CName",
+                        ["$storage"] = "string",
+                        ["$value"] = initializer.voiceTagName or ""
+                    }
+                }
+            })
+        end
+    end
+
+    return exported
+end
+
 local function hasEntryPhase(entry, phase)
     for _, entryPhase in pairs(entry.phases) do
         if entryPhase.phaseName == phase then
@@ -2082,6 +2162,7 @@ function exportUI.handleCommunities(projectName, communities, spotNodes, nodeRef
                         ["$value"] = entry.entryName
                     },
                     ["spawnInView"] = entry.spawnInView == false and "false_" or "default__true_",
+                    ["initializers"] = exportEntryInitializers(entry.initializers),
                     ["phases"] = phases,
                 }
             })
@@ -2089,7 +2170,8 @@ function exportUI.handleCommunities(projectName, communities, spotNodes, nodeRef
 
         table.insert(registryEntries, {
             ["$type"] = "worldCommunityRegistryItem",
-            ["communityAreaType"] = "Regular",
+            -- Must agree with the area node class the spawnable exported, see community:getNodeType.
+            ["communityAreaType"] = community.areaType or "Streamable",
             ["communityId"] = {
                 ["$type"] = "gameCommunityID",
                 ["entityId"] = {
@@ -2255,8 +2337,14 @@ function exportUI.exportGroup(group)
             -- Handle device nodes
             if object.ref.spawnable.node == "worldDeviceNode" then
                 exportUI.handleDevice(object, devices, psEntries, childs, nodeRefMap)
-            elseif object.ref.spawnable.node == "worldCompiledCommunityAreaNode_Streamable" then
-                table.insert(communities, { data = object.ref.spawnable.entries, node = exported.nodes[#exported.nodes] })
+            elseif object.ref.spawnable.node == "worldCompiledCommunityAreaNode"
+                or object.ref.spawnable.node == "worldCompiledCommunityAreaNode_Streamable" then
+                table.insert(communities, {
+                    data = object.ref.spawnable.entries,
+                    node = exported.nodes[#exported.nodes],
+                    areaType = object.ref.spawnable:getAreaType(),
+                    hostedInAlwaysLoaded = object.ref.spawnable:isAlwaysLoadedHosted()
+                })
             elseif object.ref.spawnable.node == "worldAISpotNode" then
                 table.insert(spotNodes, {
                     ref = object.ref.spawnable.nodeRef,

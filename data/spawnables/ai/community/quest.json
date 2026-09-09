@@ -1,0 +1,39 @@
+{
+    "rotationRelative": false,
+    "scaleLocked": true,
+    "pos": {
+        "y": 0,
+        "w": 0,
+        "z": 0,
+        "x": 0
+    },
+    "hiddenByParent": false,
+    "transformExpanded": true,
+    "propertyHeaderStates": [],
+    "expandable": false,
+    "childs": [],
+    "selected": false,
+    "visible": true,
+    "spawnable": {
+        "rotationRelative": false,
+        "modulePath": "ai/communityArea",
+        "dataType": "Community",
+        "areaType": "Regular",
+        "primaryRange": 200,
+        "position": {
+            "y": 0,
+            "w": 0,
+            "z": 0,
+            "x": 0
+        },
+        "rotation": {
+            "pitch": 0,
+            "yaw": 0,
+            "roll": 0
+        }
+    },
+    "name": "Community - Quest",
+    "isUsingSpawnables": true,
+    "headerOpen": false,
+    "modulePath": "modules/classes/editor/spawnableElement"
+}
