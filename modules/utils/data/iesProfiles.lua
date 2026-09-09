@@ -113,6 +113,39 @@ function iesProfiles.getNext(current)
     return nextValue, nextValue ~= current
 end
 
+---Returns the profile that precedes `current` in the selectable list, wrapping around.
+---The "none" sentinel is part of the cycle (position 0), so cycling back from "None"
+---selects the last profile and cycling back from the first profile returns to "None".
+---@param current string?
+---@return string previous
+---@return boolean changed
+function iesProfiles.getPrevious(current)
+    local list = iesProfiles.get()
+    local count = #list
+    if count == 0 then
+        return current or iesProfiles.none, false
+    end
+
+    current = current or iesProfiles.none
+
+    -- Virtual index: 0 = none, 1..count = profiles.
+    local currentIndex = 0
+    for index, path in ipairs(list) do
+        if path == current then
+            currentIndex = index
+            break
+        end
+    end
+
+    local previousIndex = currentIndex - 1
+    if previousIndex < 0 then
+        previousIndex = count
+    end
+
+    local previousValue = previousIndex == 0 and iesProfiles.none or list[previousIndex]
+    return previousValue, previousValue ~= current
+end
+
 ---Extracts the readable depot path from a raRef:CIESDataResource value as stored in
 ---component instance data, i.e. `{ Flags = ..., DepotPath = { $value = ... } }`.
 ---Returns "" when unset. Falls back to hash resolution when the path is stored as a hash.

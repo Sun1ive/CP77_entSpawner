@@ -991,6 +991,15 @@ function lightComponentUI.install(entity)
         ImGui.SameLine()
         ImGui.BeginDisabled(#iesProfiles.get() == 0)
         style.pushButtonNoBG(true)
+        if ImGui.Button(IconGlyphs.SkipPrevious .. getLightComponentWidgetID(componentID, path, "CyclePrevious")) then
+            local previousProfile, cycled = iesProfiles.getPrevious(currentPath)
+            if cycled then
+                history.addAction(history.getElementChange(self.object))
+                commitProfile(previousProfile)
+            end
+        end
+        style.tooltip("Select the previous IES profile.")
+        ImGui.SameLine()
         if ImGui.Button(IconGlyphs.SkipNext .. getLightComponentWidgetID(componentID, path, "Cycle")) then
             local nextProfile, cycled = iesProfiles.getNext(currentPath)
             if cycled then
@@ -1000,7 +1009,7 @@ function lightComponentUI.install(entity)
         end
         style.pushButtonNoBG(false)
         ImGui.EndDisabled()
-        style.tooltip("Select the next IES profile. Wraps around, including 'None'.")
+        style.tooltip("Select the next IES profile.")
 
         ImGui.SameLine()
         style.pushButtonNoBG(true)

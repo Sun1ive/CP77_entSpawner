@@ -375,20 +375,23 @@ function entity:setAppearance(app, options)
     return true
 end
 
----Selects the next appearance in the loaded list, wrapping at the end.
+---Selects an adjacent appearance in the loaded list, wrapping at either end.
+---@param direction integer? Positive selects the next appearance; negative selects the previous one.
 ---@return boolean changed
-function entity:cycleAppearance()
+function entity:cycleAppearance(direction)
     local appCount = #(self.apps or {})
     if appCount <= 1 then
         return false
     end
 
+    direction = (tonumber(direction) or 1) < 0 and -1 or 1
+
     local currentIndex = utils.indexValue(self.apps, self.app)
     if type(currentIndex) ~= "number" or currentIndex < 1 or currentIndex > appCount then
-        currentIndex = 0
+        currentIndex = direction > 0 and 0 or 1
     end
 
-    local nextIndex = (currentIndex % appCount) + 1
+    local nextIndex = ((currentIndex - 1 + direction) % appCount) + 1
 
     return self:setAppearance(self.apps[nextIndex], { recordHistory = true })
 end
@@ -1526,12 +1529,17 @@ function entity:drawEntityBaseProperties()
     ImGui.SameLine()
     ImGui.BeginDisabled(greyOut)
     style.pushButtonNoBG(true)
+    if ImGui.Button(IconGlyphs.SkipPrevious .. "##cyclePreviousEntityAppearance") then
+        self:cycleAppearance(-1)
+    end
+    style.tooltip("Select the previous entity appearance.")
+    ImGui.SameLine()
     if ImGui.Button(IconGlyphs.SkipNext .. "##cycleEntityAppearance") then
         self:cycleAppearance()
     end
+    style.tooltip("Select the next entity appearance.")
     style.pushButtonNoBG(false)
     ImGui.EndDisabled()
-    style.tooltip("Select the next entity appearance. Wraps to the first appearance at the end of the list.")
     style.popGreyedOut(greyOut)
     ImGui.SameLine()
     style.pushButtonNoBG(true)

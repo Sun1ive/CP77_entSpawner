@@ -5,6 +5,7 @@ local visualizer = require("modules/utils/preview/visualizer")
 local utils = require("modules/utils/core/utils")
 local lcHelper = require("modules/utils/ui/lightChannelHelper")
 local config = require("modules/utils/core/config")
+local history = require("modules/utils/project/history")
 local envProbeOptionsCache = nil
 local envProbeOptionSetCache = nil
 local envProbeLowerCache = nil
@@ -160,6 +161,47 @@ function reflection:getEnvProbeSelectorOptions()
     return self.envProbeOptions or {}
 end
 
+---@param probePath string
+---@param recordHistory boolean?
+---@return boolean changed
+function reflection:setEnvProbe(probePath, recordHistory)
+    local nextProbe = normalizeProbePath(probePath)
+    if nextProbe == "" or nextProbe == self.spawnData then
+        return false
+    end
+
+    if recordHistory and self.object then
+        history.addAction(history.getElementChange(self.object))
+    end
+
+    self.spawnData = nextProbe
+    self:respawn()
+
+    return true
+end
+
+---Selects an adjacent envprobe resource, wrapping at either end of the list.
+---@param direction integer? Positive selects the next resource; negative selects the previous one.
+---@return boolean changed
+function reflection:cycleEnvProbe(direction)
+    local options = self:getEnvProbeSelectorOptions()
+    local optionCount = #options
+    if optionCount <= 1 then
+        return false
+    end
+
+    direction = (tonumber(direction) or 1) < 0 and -1 or 1
+
+    local currentIndex = utils.indexValue(options, normalizeProbePath(self.spawnData))
+    if type(currentIndex) ~= "number" or currentIndex < 1 or currentIndex > optionCount then
+        currentIndex = direction > 0 and 0 or 1
+    end
+
+    local nextIndex = ((currentIndex - 1 + direction) % optionCount) + 1
+
+    return self:setEnvProbe(options[nextIndex], true)
+end
+
 function reflection:onAssemble(entity)
     spawnable.onAssemble(self, entity)
 
@@ -231,7 +273,8 @@ function reflection:draw()
     style.mutedText("Env Probe")
     ImGui.SameLine()
     ImGui.SetCursorPosX(self.maxPropertyWidth)
-    local selectorWidth = style.getMaxWidth(260)
+    local envProbeOptions = self:getEnvProbeSelectorOptions()
+    local selectorWidth = style.getRowFieldWidth({ IconGlyphs.SkipPrevious, IconGlyphs.SkipNext }, 260)
     local selectorPixelWidth = selectorWidth * style.viewSize
     local itemWidth = math.max(80, selectorPixelWidth - (2 * ImGui.GetStyle().FramePadding.x) - ImGui.GetStyle().ItemSpacing.x)
     local selectorOptions = self:getFilteredEnvProbeOptions(self.envProbeSearch)
@@ -265,10 +308,28 @@ function reflection:draw()
         }
     )
 
-    if changed and selectedProbe ~= "" and selectedProbe ~= self.spawnData then
-        self.spawnData = selectedProbe
-        self:respawn()
+    if changed then
+        -- The tracked dropdown already pushed history.
+        self:setEnvProbe(selectedProbe, false)
     end
+
+    local greyOut = #envProbeOptions <= 1
+    ImGui.SameLine()
+    style.pushGreyedOut(greyOut)
+    style.pushButtonNoBG(true)
+    ImGui.BeginDisabled(greyOut)
+    if ImGui.Button(IconGlyphs.SkipPrevious .. "##cyclePreviousEnvProbe") then
+        self:cycleEnvProbe(-1)
+    end
+    style.tooltip("Select the previous envprobe resource.")
+    ImGui.SameLine()
+    if ImGui.Button(IconGlyphs.SkipNext .. "##cycleNextEnvProbe") then
+        self:cycleEnvProbe()
+    end
+    style.tooltip("Select the next envprobe resource.")
+    ImGui.EndDisabled()
+    style.pushButtonNoBG(false)
+    style.popGreyedOut(greyOut)
 
     self:drawPreviewCheckbox("Visualize outline", self.maxPropertyWidth)
 

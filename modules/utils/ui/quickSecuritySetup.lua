@@ -275,7 +275,7 @@ function quickSecuritySetupUI.install(device)
             apps,
             {
                 element = targetElement or self.object,
-                width = style.getRowFieldWidth({ IconGlyphs.SkipNext, IconGlyphs.Reload }),
+                width = style.getRowFieldWidth({ IconGlyphs.SkipPrevious, IconGlyphs.SkipNext, IconGlyphs.Reload }),
                 matchContentWidth = true,
                 tooltip = "Body this device is built with: which mount, housing or shape the entity spawns as.\nNot a security setting -- it changes the mesh, not what the network does with it."
             }
@@ -291,11 +291,17 @@ function quickSecuritySetupUI.install(device)
         style.pushButtonNoBG(true)
 
         ImGui.BeginDisabled(greyOut)
+        if ImGui.Button(IconGlyphs.SkipPrevious .. "##securityDeviceAppearanceCyclePrevious") and not greyOut then
+            targetSpawnable:cycleAppearance(-1)
+        end
+        style.tooltip("Select the previous appearance.")
+
+        ImGui.SameLine()
         if ImGui.Button(IconGlyphs.SkipNext .. "##securityDeviceAppearanceCycle") and not greyOut then
             targetSpawnable:cycleAppearance()
         end
         ImGui.EndDisabled()
-        style.tooltip("Select the next appearance. Wraps at the end of the list.")
+        style.tooltip("Select the next appearance.")
 
         ImGui.SameLine()
         if ImGui.Button(IconGlyphs.Reload .. "##securityDeviceAppearanceReload") then

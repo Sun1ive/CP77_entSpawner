@@ -1270,6 +1270,18 @@ function light:draw()
     ImGui.SameLine()
     ImGui.BeginDisabled(#iesProfiles.get() == 0)
     style.pushButtonNoBG(true)
+    if ImGui.Button(IconGlyphs.SkipPrevious .. "##cyclePreviousIESProfile") then
+        local previousProfile, cycled = iesProfiles.getPrevious(self.iesProfile)
+        if cycled then
+            if self.object then
+                history.addAction(history.getElementChange(self.object))
+            end
+            self.iesProfile = previousProfile
+            self:updateFull(true)
+        end
+    end
+    style.tooltip("Select the previous IES profile.")
+    ImGui.SameLine()
     if ImGui.Button(IconGlyphs.SkipNext .. "##cycleIESProfile") then
         local nextProfile, cycled = iesProfiles.getNext(self.iesProfile)
         if cycled then
@@ -1282,7 +1294,7 @@ function light:draw()
     end
     style.pushButtonNoBG(false)
     ImGui.EndDisabled()
-    style.tooltip("Select the next IES profile. Wraps around, including 'None'.")
+    style.tooltip("Select the next IES profile.")
 
     ImGui.SameLine()
     style.pushButtonNoBG(true)
