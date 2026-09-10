@@ -251,10 +251,28 @@ about.dependencies = {
         end
     },
     {
+        id = "worldBuilderTools",
+        name = "World Builder Tools",
+        required = false,
+        provides = "Ships with World Builder. Writes SplinePoint tangents, which CET cannot: without it the Spline preview NPC walks engine-fitted tangents instead of the authored ones.",
+        check = function()
+            -- The plugin registers a global RTTI function rather than a class, so ask it directly.
+            local ok, ready = pcall(function()
+                return WBSplineToolsReady ~= nil and WBSplineToolsReady()
+            end)
+
+            if ok and ready then
+                return about.states.ok
+            end
+
+            return about.states.missing
+        end
+    },
+    {
         id = "redHotTools",
         name = "Red Hot Tools",
         required = false,
-        provides = "Provides the World Inspector that World Builder adds its own actions to: send a node to the search, run the Replacer on it, copy its AXL node mutation.",
+        provides = "Provides the World Inspector that World Builder adds its own actions to: send a node to the search, run the Replacer on it, copy its AXL node mutation. Also the only route to the placeholder world nodes the Spline preview NPC walks.",
         url = "https://github.com/psiberx/cp2077-red-hot-tools",
         check = function()
             if getMod("RedHotTools") then

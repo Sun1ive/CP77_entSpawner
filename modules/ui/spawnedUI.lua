@@ -2548,14 +2548,10 @@ function spawnedUI.getStateIcons(element)
             )
         end
 
-        if spawnable.isSplineNode and spawnable.splineFollower then
-            local missingRecord = spawnable.previewCharacter == nil or tostring(spawnable.previewCharacter):match("^%s*$") ~= nil
-            local tooltip = "Preview NPC is enabled"
-            if missingRecord then
-                tooltip = tooltip .. ", but Record is missing"
-            end
-
-            addStateIcon(stateIcons, IconGlyphs.Walk, tooltip, missingRecord and STATE_COLOR_ORANGE or nil)
+        -- Marks a live run, not a setting: a preview NPC only exists between Play and the end of
+        -- the spline, so this is how you find the one that is still walking.
+        if spawnable.isSplineNode and spawnable._followerPlaying then
+            addStateIcon(stateIcons, IconGlyphs.Walk, "Preview NPC is walking this spline")
         end
 
         if spawnable.modulePath == "ai/aiSpot" and spawnable.spawnNPC then

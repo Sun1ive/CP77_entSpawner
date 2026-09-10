@@ -10,25 +10,27 @@ local settings = require("modules/utils/core/settings")
 local visualizer = require("modules/utils/preview/visualizer")
 local logger = require("modules/utils/core/logger")
 local previewHosts = require("modules/utils/preview/previewHosts")
+local splinePool = require("modules/utils/preview/splinePool")
 
 local minCurvePreviewSamples = 8
 local maxCurvePreviewSamples = 24
--- Measured ceiling: the game crashes once a single entity carries more components than this.
--- bendedMesh's PATH_PREVIEW_MAX_SEGMENTS encodes the same limit. It is per entity, not global:
--- a project holds thousands of components across its spawnables without trouble.
+-- Per-entity component limit. Keep in sync with PATH_PREVIEW_MAX_SEGMENTS.
 local maxEntityPreviewComponents = 320
--- Which is why the curve preview does not live on the spline node entity at all. Its lines are
--- spread over dedicated host entities holding this many each, so the number of spline points is
--- bounded by what you are willing to render, not by the engine.
+-- Preview lines use separate hosts to stay below the per-entity limit.
 local curvePreviewComponentsPerHost = 256
 local curvePreviewHostTemplate = "base\\spawner\\empty_entity.ent"
--- Safety valve only: past this the preview decimates rather than spawning hosts without end.
+-- Decimate beyond this limit instead of spawning more hosts.
 local curvePreviewComponentCeiling = 4096
--- Chord error, in meters, that segments are flattened to at the lowest and highest curve quality.
+-- Chord-error range in meters.
 local minCurveFlattenTolerance = 0.002
 local maxCurveFlattenTolerance = 0.2
 local lengthIntegrationEpsilon = 0.00001
 local lengthIntegrationMaxDepth = 18
+
+-- Interval for syncing marker changes to a running preview.
+local followerGeometryInterval = 0.25
+-- Delay before removing a character that reached the end.
+local followerCleanupDelay = 2
 
 ---Class for worldSplineNode
 ---@class spline : visualized
@@ -39,7 +41,15 @@ local lengthIntegrationMaxDepth = 18
 ---@field protected maxPropertyWidth number
 ---@field previewCharacter string
 ---@field splineFollowerSpeed number
----@field splineFollower boolean
+---@field splineMoveType string
+---@field splineIgnoreNavigation boolean
+---@field protected _followerCommand AIMoveOnSplineCommand? Active preview command.
+---@field protected _followerSlot splinePoolSlot? Placeholder spline node the preview runs on.
+---@field protected _followerSignature string? Marker geometry last written to that node.
+---@field protected _followerIssue string? Preview start error shown in the UI.
+---@field protected _followerPlaying boolean Runtime-only preview state.
+---@field protected _followerCleanupID number? Pending cleanup Cron handle.
+---@field protected _followerResume boolean Resume the preview after respawn.
 ---@field npcID entEntityID
 ---@field npcSpawning boolean
 ---@field cronID number
@@ -58,8 +68,7 @@ function spline:new()
     o.description = "Basic spline with auto-tangents, which can be referenced using its NodeRef."
     o.icon = IconGlyphs.VectorPolyline
 
-    -- Marks any worldSplineNode-derived spawnable (basic spline, speed spline, ...).
-    -- Consumed by hierarchy state icons and spline marker preview refresh.
+    -- Identifies worldSplineNode-derived spawnables.
     o.isSplineNode = true
 
     o.previewed = true
@@ -73,7 +82,6 @@ function spline:new()
 
     o.previewCharacter = settings.defaultAISpotNPC or ""
     o.splineFollowerSpeed = settings.defaultAISpotSpeed or 1.0
-    o.splineFollower = false
 
     o.maxPropertyWidth = nil
     o.npcID = nil
@@ -82,8 +90,16 @@ function spline:new()
     o.rigs = {}
     o.apps = {}
     o.splineMoveType = "Walk"
-    o.splineReachDistance = 0.85
-    o._currentPointIndex = nil
+    o.splineIgnoreNavigation = true
+    o._followerCommand = nil
+    o._followerSlot = nil
+    o._followerSignature = nil
+    o._followerIssue = nil
+    -- Never persist preview playback.
+    o._followerPlaying = false
+    o._followerCleanupID = nil
+    o._followerResume = false
+    o._followerRebuildTimer = 0
     o.curvePreviewSamples = math.floor(math.max(minCurvePreviewSamples, math.min(maxCurvePreviewSamples, settings.defaultSplineCurveQuality or 12)))
     o._curvePreviewComponentCount = 0
 
@@ -141,7 +157,7 @@ function spline:getInterpolatedPosition(t)
         self:loadSplinePoints()
     end
 
-    -- t ranges from 0 to 1
+    -- Normalize t from 0 to 1.
     if #self.points == 0 then
         return self.position
     end
@@ -155,7 +171,7 @@ function spline:getInterpolatedPosition(t)
         table.insert(points, self.points[i])
     end
 
-    -- Calculate which segment t falls into
+    -- Find the segment containing t.
     local segmentCount = #points - 1
     local scaledT = t * segmentCount
     local segmentIndex = math.floor(scaledT) + 1
@@ -173,7 +189,7 @@ function spline:getInterpolatedPosition(t)
     local p0 = points[segmentIndex]
     local p1 = points[segmentIndex + 1]
 
-    -- Linear interpolation between two points
+    -- Interpolate between the endpoints.
     local interpolated = Vector4.new(
         p0.x + (p1.x - p0.x) * localT,
         p0.y + (p1.y - p0.y) * localT,
@@ -353,8 +369,7 @@ function spline:refreshLinkedMarkerTangents(refreshEdgeTangents)
     end
 
     for _, marker in ipairs(markers) do
-        -- Always refresh marker connector transforms when spline topology changes
-        -- (e.g. looped on/off), otherwise the last->first straight segment can stay stale.
+        -- Refresh connectors after topology changes such as loop toggles.
         marker:updateTransform(splineGroup)
     end
 
@@ -374,31 +389,131 @@ function spline:refreshLinkedMarkerTangents(refreshEdgeTangents)
     end
 end
 
-function spline:buildMoveCommand(targetPos)
-    local dest = NewObject("WorldPosition")
-    dest:SetVector4(dest, ToVector4(targetPos))
+---Builds a signature used to detect preview geometry changes.
+---@param defs table
+---@return string
+local function geometrySignature(defs, looped)
+    local parts = {}
 
-    local positionSpec = NewObject("AIPositionSpec")
-    positionSpec:SetWorldPosition(positionSpec, dest)
+    for i = 1, #defs do
+        local def = defs[i]
+        local tangentIn = def.tangentIn or { x = 0, y = 0, z = 0 }
+        local tangentOut = def.tangentOut or { x = 0, y = 0, z = 0 }
 
-    local cmd = NewObject("handle:AIMoveToCommand")
-    cmd.movementTarget = positionSpec
-    cmd.rotateEntityTowardsFacingTarget = false
-    cmd.ignoreNavigation = false
-    cmd.desiredDistanceFromTarget = self.splineReachDistance
-    cmd.movementType = self.splineMoveType
-    cmd.finishWhenDestinationReached = true
+        parts[i] = string.format("%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%s",
+            def.position.x, def.position.y, def.position.z,
+            tangentIn.x or 0, tangentIn.y or 0, tangentIn.z or 0,
+            tangentOut.x or 0, tangentOut.y or 0, tangentOut.z or 0,
+            tostring(def.automaticTangents ~= false))
+    end
 
-    return cmd
+    parts[#parts + 1] = looped and "looped" or "open"
+
+    return table.concat(parts, ";")
 end
 
-function spline:sendMoveCommand(npc, targetPos)
-    if not npc then return false end
-    local aiController = npc:GetAIControllerComponent()
-    if not aiController then return false end
+---Returns the authored marker data used by preview and export.
+---@return table
+function spline:getFollowerSplineDefs()
+    local defs = self:getSplineMarkerDefs()
 
-    aiController:SendCommand(self:buildMoveCommand(targetPos))
+    if #defs == 0 and self.pointDefs and #self.pointDefs > 0 then
+        defs = utils.deepcopy(self.pointDefs)
+    end
+
+    if #defs == 0 then
+        self:loadSplinePoints()
+        for i = 1, #self.points do
+            defs[i] = {
+                position = self.points[i],
+                tangentIn = { x = 0, y = 0, z = 0 },
+                tangentOut = { x = 0, y = 0, z = 0 },
+                automaticTangents = true
+            }
+        end
+    end
+
+    return defs
+end
+
+---Writes changed marker geometry to the preview node.
+---@return boolean written
+function spline:refreshFollowerGeometry()
+    if not self._followerSlot then return false end
+
+    local defs = self:getFollowerSplineDefs()
+    if #defs < 2 then return false end
+
+    local signature = geometrySignature(defs, self.looped)
+    if signature == self._followerSignature then return false end
+
+    if not splinePool.write(self._followerSlot, defs, self.looped) then return false end
+
+    self._followerSignature = signature
     return true
+end
+
+---Builds the movement spec for the preview command.
+---@return AIMovementTypeSpec
+function spline:buildFollowerMovementType()
+    local movementType = NewObject("AIMovementTypeSpec")
+    movementType.useNPCMovementParams = false
+    movementType.movementType = self.splineMoveType
+
+    return movementType
+end
+
+---Starts movement on the placeholder spline node.
+---@param npc gameObject
+---@return boolean sent
+function spline:sendSplineCommand(npc)
+    local slot = self._followerSlot
+    local aiController = npc and npc:GetAIControllerComponent()
+    if not slot or not aiController then return false end
+
+    local cmd = NewObject("handle:AIMoveOnSplineCommand")
+    cmd.spline = slot.nodeRef
+    cmd.movementType = self:buildFollowerMovementType()
+    -- Direction belongs to the command, not the node data.
+    cmd.reverse = self.reverse and true or false
+    cmd.ignoreNavigation = self.splineIgnoreNavigation and true or false
+    cmd.startFromClosestPoint = true
+    -- Re-read the spline while walking to follow marker edits.
+    cmd.splineRecalculation = true
+    cmd.snapToTerrain = true
+    cmd.useStart = true
+    cmd.useStop = true
+    cmd.rotateEntityTowardsFacingTarget = false
+
+    self._followerCommand = cmd
+    aiController:SendCommand(cmd)
+
+    return true
+end
+
+---Restarts movement from the character's current position.
+function spline:restartFollowerCommand()
+    if not self._followerSlot then return end
+
+    local npc = self:getNPC()
+    if not npc then return end
+
+    self:sendSplineCommand(npc)
+end
+
+---Command states that indicate an active run.
+local followerRunningStates = { NotExecuting = true, Enqueued = true, Executing = true }
+
+---@return boolean running
+function spline:isFollowerCommandRunning()
+    if not self._followerCommand then return false end
+
+    local ok, state = pcall(function() return self._followerCommand.state end)
+    if not ok or not state then return true end
+
+    local name = state.value or tostring(state)
+
+    return followerRunningStates[name] == true
 end
 
 function spline:loadSplinePoints()
@@ -580,7 +695,7 @@ function spline:getBezierArcLength(p0, c0, c1, p1, epsilon, maxDepth)
         local delta = left + right - whole
 
         if depth <= 0 or math.abs(delta) <= 15 * eps then
-            -- Richardson extrapolation term improves final precision.
+            -- Improve precision with Richardson extrapolation.
             return left + right + delta / 15
         end
 
@@ -617,7 +732,7 @@ local function chordDistance(point, p0, p1)
     return math.sqrt(px * px + py * py + pz * pz)
 end
 
----Chord error, in meters, that segments get flattened to at the given curve quality.
+---Returns the chord-error tolerance for a curve quality.
 ---@param quality number
 ---@return number
 local function getFlattenTolerance(quality)
@@ -632,7 +747,7 @@ local function getCurvePreviewName(index)
     return "curvePreview" .. tostring(index)
 end
 
----Whether `entity` can take one more preview component without crossing the ceiling.
+---Checks whether an entity can accept another preview component.
 ---@param entity entEntity
 ---@return boolean
 function spline:canAddPreviewComponent(entity)
@@ -645,8 +760,7 @@ function spline:canAddPreviewComponent(entity)
     return count < maxEntityPreviewComponents
 end
 
----Pool of host entities the curve preview lines live on. Kept off the spline node entity so its
----own components never compete with them for the per-entity ceiling.
+---Returns the host pool for curve preview lines.
 ---@return previewHostPool
 function spline:getCurvePreviewHosts()
     if not self._curvePreviewHosts then
@@ -682,7 +796,7 @@ function spline:getCurvePreviewComponent(index)
     return component
 end
 
----Splits the preview markers into bezier segments, including the closing one when looped.
+---Builds bezier segments, including the closing loop segment.
 ---@param pointDefs table
 ---@return table segments List of { defA, defB } pairs.
 function spline:getCurveSegments(pointDefs)
@@ -700,7 +814,7 @@ function spline:getCurveSegments(pointDefs)
     return segments
 end
 
----Control points of the bezier running between two marker defs.
+---Returns bezier control points for two markers.
 ---@return Vector4 p0, Vector4 c0, Vector4 c1, Vector4 p1
 function spline:getSegmentControlPoints(defA, defB)
     local p0 = defA.position
@@ -711,9 +825,7 @@ function spline:getSegmentControlPoints(defA, defB)
     return p0, c0, c1, p1
 end
 
----How many samples a segment needs to stay within `tolerance` of the real curve. The control
----points bound how far a bezier leaves its chord and uniform subdivision cuts that error by
----roughly n², so a straight run costs a single line and only real curvature costs more.
+---Estimates samples needed to keep the segment within the error tolerance.
 ---@param tolerance number Chord error budget in meters.
 ---@param maxSamples number Upper bound, from the curve quality setting.
 ---@return number
@@ -724,7 +836,7 @@ function spline:getSegmentSampleCount(p0, c0, c1, p1, tolerance, maxSamples)
     return math.max(1, math.min(maxSamples, math.ceil(math.sqrt(0.75 * deviation / tolerance))))
 end
 
----Sample count for every segment, and the number of lines they add up to.
+---Returns per-segment samples and their total.
 ---@param segments table
 ---@param quality number
 ---@param tolerance number
@@ -785,9 +897,7 @@ function spline:drawBezierPreviewSegment(defA, defB, samples, used, budget)
     return used
 end
 
----Draws the whole spline with `budget` evenly spaced samples instead of a fixed number per
----segment. Only reached by splines with more segments than the safety ceiling: every sample
----still sits on the real curve, the preview just gets coarser rather than stopping partway.
+---Draws the full spline within a fixed line budget.
 ---@param segments table
 ---@param budget number
 ---@return number used
@@ -821,8 +931,7 @@ function spline:updateCurvePreview()
     local used = 0
     pool.pending = false
 
-    -- A hidden preview draws nothing: no hosts get spawned for it, and any it already has are
-    -- left alone so toggling the preview back on is instant rather than a respawn.
+    -- Keep existing hosts while hidden for fast reactivation.
     if self.previewed then
         local segments = self:getCurveSegments(self:getPreviewSplineMarkerDefs())
         local quality = math.floor(math.max(minCurvePreviewSamples, math.min(maxCurvePreviewSamples, self.curvePreviewSamples or 12)))
@@ -841,8 +950,7 @@ function spline:updateCurvePreview()
         end
     end
 
-    -- While a host is still spawning the line count is not final: leave the components and the
-    -- hosts as they are, and let that host's assemble callback redraw with the real total.
+    -- Let a spawning host redraw once its final line count is known.
     if pool.pending then return end
 
     for i = used + 1, self._curvePreviewComponentCount do
@@ -863,7 +971,9 @@ function spline:updateCurvePreview()
 end
 
 function spline:onNPCSpawned(npc)
-    -- Ensure we have a valid character record, fallback to saved default if current is empty
+    self._followerIssue = nil
+
+    -- Fall back to the saved default character.
     if not self.previewCharacter or not self.previewCharacter:match("^Character.") then
         self.previewCharacter = settings.defaultAISpotNPC or ""
         if not self.previewCharacter or not self.previewCharacter:match("^Character.") then
@@ -871,66 +981,77 @@ function spline:onNPCSpawned(npc)
         end
     end
 
-    local points = self:getFollowerPathPoints()
-    if #points == 0 then return end
-
-    npc:SetIndividualTimeDilation("", self.splineFollowerSpeed)
-
-    if #points == 1 then
-        Game.GetTeleportationFacility():Teleport(npc, ToVector4(points[1]), EulerAngles.new(0, 0, 0))
+    local defs = self:getFollowerSplineDefs()
+    if #defs < 2 then
+        self._followerIssue = "This spline needs at least two markers to walk."
+        self:stopPreviewNPC()
         return
     end
 
-    -- Start at the first marker, then move marker-to-marker using AI navigation.
-    Game.GetTeleportationFacility():Teleport(npc, ToVector4(points[1]), EulerAngles.new(0, 0, 0))
-    self._currentPointIndex = 2
-    self:sendMoveCommand(npc, points[self._currentPointIndex])
-    self._activeTargetPos = utils.fromVector(ToVector4(points[self._currentPointIndex]))
+    -- Match the preview node class to the exported node class.
+    local slot = splinePool.claim(self, self.node)
+    if not slot then
+        self._followerIssue = splinePool.lastReason
+        logger:warn("[Spline] preview NPC could not start: " .. tostring(splinePool.lastReason))
+        self:stopPreviewNPC()
+        return
+    end
 
-    self.cronID = Cron.Every(0.1, function()
-        if not self.npcID or not self:isSpawned() or not self.splineFollower then return end
+    self._followerSlot = slot
+    self._followerSignature = nil
+
+    if not self:refreshFollowerGeometry() then
+        self._followerIssue = "The preview spline node could not be written."
+        self:stopPreviewNPC()
+        return
+    end
+
+    -- Time dilation affects all animation; movement type controls speed.
+    if self.splineFollowerSpeed ~= 1 then
+        npc:SetIndividualTimeDilation("", self.splineFollowerSpeed)
+    end
+
+    local points = self:getFollowerPathPoints()
+    if #points > 0 then
+        local start = points[1]
+        local yaw = 0
+        if #points > 1 then
+            yaw = utils.subVector(ToVector4(points[2]), ToVector4(start)):ToRotation().yaw
+        end
+        Game.GetTeleportationFacility():Teleport(npc, ToVector4(start), EulerAngles.new(0, 0, yaw))
+    end
+
+    if not self:sendSplineCommand(npc) then
+        self._followerIssue = "The character would not take the spline command."
+        self:stopPreviewNPC()
+        return
+    end
+
+    self._followerRebuildTimer = 0
+
+    self.cronID = Cron.OnUpdate(function()
+        if not self.npcID or not self:isSpawned() or not self._followerPlaying then return end
 
         local follower = self:getNPC()
         if not follower then return end
 
-        local ordered = self:getFollowerPathPoints()
-        if #ordered < 2 then return end
-
-        if not self._currentPointIndex then
-            self._currentPointIndex = 2
+        -- Periodically sync dragged markers into the active walk.
+        local moved = false
+        self._followerRebuildTimer = (self._followerRebuildTimer or 0) + (Cron.deltaTime or 0)
+        if self._followerRebuildTimer >= followerGeometryInterval then
+            self._followerRebuildTimer = 0
+            moved = self:refreshFollowerGeometry()
         end
 
-        if self._currentPointIndex > #ordered then
-            if self.looped then
-                self._currentPointIndex = 1
+        -- Restart looped or edited runs; finish completed open splines.
+        if not self:isFollowerCommandRunning() and not self._followerCleanupID then
+            if self.looped or moved then
+                self:sendSplineCommand(follower)
             else
-                self._currentPointIndex = #ordered
-                return
+                -- Briefly hold at the end before cleanup.
+                self._followerCommand = nil
+                self:scheduleFollowerCleanup()
             end
-        end
-
-        local target = ordered[self._currentPointIndex]
-        if not target then return end
-
-        if not self._activeTargetPos or utils.distanceVector(self._activeTargetPos, target) > 0.01 then
-            self:sendMoveCommand(follower, target)
-            self._activeTargetPos = utils.fromVector(ToVector4(target))
-        end
-
-        if utils.distanceVector(follower:GetWorldPosition(), target) <= self.splineReachDistance then
-            self._currentPointIndex = self._currentPointIndex + 1
-
-            if self._currentPointIndex > #ordered then
-                if self.looped then
-                    self._currentPointIndex = 1
-                else
-                    self._currentPointIndex = #ordered
-                    return
-                end
-            end
-
-            self:sendMoveCommand(follower, ordered[self._currentPointIndex])
-            self._activeTargetPos = utils.fromVector(ToVector4(ordered[self._currentPointIndex]))
         end
     end)
 end
@@ -939,13 +1060,37 @@ function spline:onAssemble(entity)
     visualized.onAssemble(self, entity)
     self:updateCurvePreview()
 
-    if not self.splineFollower then return end
+    if self._followerResume then
+        self._followerResume = false
+        self:startPreviewNPC()
+    end
+end
+
+---Spawns the preview character and starts movement.
+---@return boolean started
+function spline:startPreviewNPC()
+    if self._followerPlaying then return false end
+
+    self._followerIssue = nil
+
+    if not self.previewCharacter or not self.previewCharacter:match("^Character.") then
+        self.previewCharacter = settings.defaultAISpotNPC or ""
+    end
+
+    if not self.previewCharacter:match("^Character.") then
+        self._followerIssue = "Set a Character record before playing the preview."
+        return false
+    end
 
     local points = self:getFollowerPathPoints()
-    local spawnPos = self.position
-    if #points > 0 then
-        spawnPos = ToVector4(points[1])
+    if #points < 2 then
+        self._followerIssue = "This spline needs at least two markers to walk."
+        return false
     end
+
+    self._followerPlaying = true
+
+    local spawnPos = ToVector4(points[1])
 
     local spec = DynamicEntitySpec.new()
     spec.recordID = self.previewCharacter
@@ -1012,6 +1157,47 @@ function spline:onAssemble(entity)
     .found(function()
         self.apps = cache.getValue(appCacheKey) or {}
     end)
+
+    return true
+end
+
+---Stops the preview, removes its character, and releases its node.
+function spline:stopPreviewNPC()
+    if self._followerCleanupID then
+        Cron.Halt(self._followerCleanupID)
+        self._followerCleanupID = nil
+    end
+
+    if self.cronID then
+        Cron.Halt(self.cronID)
+        self.cronID = nil
+    end
+
+    self._followerCommand = nil
+    self._followerRebuildTimer = 0
+    self._followerSignature = nil
+    self._followerPlaying = false
+
+    -- Release the node; its unused geometry can remain.
+    splinePool.release(self)
+    self._followerSlot = nil
+
+    if self.npcID then
+        Game.GetDynamicEntitySystem():DeleteEntity(self.npcID)
+        self.npcID = nil
+    end
+
+    self.npcSpawning = false
+end
+
+---Schedules cleanup after the arrival delay.
+function spline:scheduleFollowerCleanup()
+    if self._followerCleanupID then return end
+
+    self._followerCleanupID = Cron.After(followerCleanupDelay, function()
+        self._followerCleanupID = nil
+        self:stopPreviewNPC()
+    end)
 end
 
 function spline:despawn()
@@ -1020,18 +1206,9 @@ function spline:despawn()
     self:getCurvePreviewHosts():despawn()
     self._curvePreviewComponentCount = 0
 
-    if self.cronID then
-        Cron.Halt(self.cronID)
-        self.cronID = nil
-    end
-
-    if not self.npcID then return end
-
-    Game.GetDynamicEntitySystem():DeleteEntity(self.npcID)
-    self.npcID = nil
-    self.npcSpawning = false
-    self._currentPointIndex = nil
-    self._activeTargetPos = nil
+    -- Resume an active preview after spline respawn.
+    self._followerResume = self._followerPlaying
+    self:stopPreviewNPC()
 end
 
 function spline:spawn()
@@ -1107,8 +1284,8 @@ function spline:save()
     data.looped = self.looped
     data.previewCharacter = self.previewCharacter
     data.splineFollowerSpeed = self.splineFollowerSpeed
-    data.splineFollower = self.splineFollower
     data.splineMoveType = self.splineMoveType
+    data.splineIgnoreNavigation = self.splineIgnoreNavigation
     data.curvePreviewSamples = self.curvePreviewSamples
 
     return data
@@ -1141,7 +1318,7 @@ function spline:draw()
     visualized.draw(self)
 
     if not self.maxPropertyWidth then
-        self.maxPropertyWidth = utils.getTextMaxWidth({ "Visualize position", "Curve Quality", "Spline Path", "Spline Length", "Reverse", "Looped", "Preview NPC", "Preview NPC Record", "Movement Type", "Movement Speed" }) + 2 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
+        self.maxPropertyWidth = utils.getTextMaxWidth({ "Visualize position", "Curve Quality", "Spline Path", "Spline Length", "Reverse", "Looped", "Preview NPC", "Preview NPC Record", "Movement Type", "Ignore Navmesh", "Time Dilation" }) + 2 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
     end
 
     local paths = self:loadSplinePaths()
@@ -1152,7 +1329,9 @@ function spline:draw()
     style.mutedText("Spline Path")
     ImGui.SameLine()
     ImGui.SetCursorPosX(self.maxPropertyWidth)
-    local idx, changed = style.trackedCombo(self.object, "##splinePath", index - 1, paths, 225)
+    local idx, changed = style.trackedCombo(self.object, "##splinePath", index - 1, paths, 225, {
+        tooltip = "Path to the group containing the spline points.\nMust be contained within the same root group as this spline."
+    })
     if changed then
         self.splinePath = paths[idx + 1]
         if self.object and self.object.sUI and self.object.sUI.bumpWireframeEpoch then
@@ -1160,8 +1339,6 @@ function spline:draw()
         end
         self:respawn()
     end
-    style.tooltip("Path to the group containing the spline points.\nMust be contained within the same root group as this spline.")
-
     style.mutedText("Spline Length")
     ImGui.SameLine()
     ImGui.SetCursorPosX(self.maxPropertyWidth)
@@ -1175,9 +1352,8 @@ function spline:draw()
     self.reverse, changed = style.trackedCheckbox(self.object, "##reverse", self.reverse)
     if changed then
         self:updateCurvePreview()
-        if self.splineFollower then
-            self:respawn()
-        end
+        -- Reverse through the command without respawning.
+        self:restartFollowerCommand()
     end
 
     style.mutedText("Looped")
@@ -1220,17 +1396,39 @@ function spline:draw()
         style.mutedText("Preview NPC")
         ImGui.SameLine()
         ImGui.SetCursorPosX(previewPropertyWidth)
-        self.splineFollower, changed = style.trackedCheckbox(self.object, "##splineFollower", self.splineFollower)
-        if changed then
-            self:respawn()
+
+        -- Playback is a one-shot runtime action.
+        local spawned = self:isSpawned()
+        style.pushGreyedOut(not spawned)
+        if self._followerPlaying then
+            if style.dangerButton(IconGlyphs.Stop .. " Stop##splineFollower", 120 * style.viewSize, 0) and spawned then
+                self:stopPreviewNPC()
+            end
+            style.tooltip("Remove the preview character and free the spline node it is walking.")
+        else
+            if ImGui.Button(IconGlyphs.Play .. " Play##splineFollower", 120 * style.viewSize, 0) and spawned then
+                self:startPreviewNPC()
+            end
+            style.tooltip("Walks a character along the spline using the game's own spline movement, so\nthe path shown is the one an AIMoveOnSpline command would take.\nAn open spline clears itself a couple of seconds after the character arrives.")
+        end
+        style.popGreyedOut(not spawned)
+
+        if self._followerIssue then
+            -- Wrap errors so important instructions remain visible.
+            style.styledTextWrapped(IconGlyphs.AlertOutline .. "  " .. self._followerIssue, style.warnColor)
+        elseif not splinePool.hasNativeTangents() then
+            style.styledText(IconGlyphs.AlertOutline .. "  Approximated tangents", style.extraMutedColor)
+            style.tooltip("The WorldBuilderTools plugin is not loaded, so the preview node cannot be given\nthe authored tangents and the engine fits its own. Markers left on automatic\ntangents are unaffected; hand-edited ones will walk a slightly different curve.")
         end
 
         style.mutedText("Preview NPC Record")
         ImGui.SameLine()
         ImGui.SetCursorPosX(previewPropertyWidth)
         self.previewCharacter, _, finished = style.trackedTextField(self.object, "##previewCharacter", self.previewCharacter, "Character.", 200)
-        if finished then
-            self:respawn()
+        -- Restart the run when its character changes.
+        if finished and self._followerPlaying then
+            self:stopPreviewNPC()
+            self:startPreviewNPC()
         end
         ImGui.SameLine()
         style.pushButtonNoBG(true)
@@ -1241,45 +1439,53 @@ function spline:draw()
         style.tooltip("Save this character as the default for Spline previews.")
         style.pushButtonNoBG(false)
 
-        if self.splineFollower then
-            local npc = self:getNPC()
-            local isNPC = self.previewCharacter:match("^Character.")
+        -- These settings also update a live command.
+        local npc = self:getNPC()
 
-            if isNPC then
-                local movementTypes = { "Walk", "Sprint" }
-                local moveTypeIndex = math.max(1, utils.indexValue(movementTypes, self.splineMoveType))
-                style.mutedText("Movement Type")
-                ImGui.SameLine()
-                ImGui.SetCursorPosX(previewPropertyWidth)
-                local moveIdx
-                moveIdx, changed = style.trackedCombo(self.object, "##splineMoveType", moveTypeIndex - 1, movementTypes, 120)
-                if changed then
-                    self.splineMoveType = movementTypes[moveIdx + 1]
-                    self:respawn()
-                end
-
-                style.mutedText("Movement Speed")
-                ImGui.SameLine()
-                ImGui.SetCursorPosX(previewPropertyWidth)
-                self.splineFollowerSpeed, changed, _ = style.trackedDragFloat(self.object, "##splineFollowerSpeed", self.splineFollowerSpeed, 0.1, 0, 5, "%.2f", 60)
-                style.tooltip("Speed of the character movement along the spline. Preview only.")
-                if changed and npc then
-                    npc:SetIndividualTimeDilation("", self.splineFollowerSpeed)
-                end
-                ImGui.SameLine()
-                style.pushButtonNoBG(true)
-
-                ImGui.PushID("saveSpeed")
-                if ImGui.Button(IconGlyphs.ContentSaveSettingsOutline) then
-                    settings.defaultAISpotSpeed = self.splineFollowerSpeed
-                    settings.save()
-                end
-                ImGui.PopID()
-
-                style.tooltip("Save this speed as the default for Spline previews.")
-                style.pushButtonNoBG(false)
+        local movementTypes = { "Walk", "Sprint" }
+        local moveTypeIndex = math.max(1, utils.indexValue(movementTypes, self.splineMoveType))
+        style.mutedText("Movement Type")
+        ImGui.SameLine()
+        ImGui.SetCursorPosX(previewPropertyWidth)
+        local moveIdx
+        moveIdx, changed = style.trackedCombo(self.object, "##splineMoveType", moveTypeIndex - 1, movementTypes, 120)
+        if changed then
+            self.splineMoveType = movementTypes[moveIdx + 1]
+            -- The move handler picks this up without a respawn.
+            if self._followerCommand then
+                self._followerCommand.movementType = self:buildFollowerMovementType()
             end
         end
+
+        style.mutedText("Ignore Navmesh")
+        ImGui.SameLine()
+        ImGui.SetCursorPosX(previewPropertyWidth)
+        self.splineIgnoreNavigation, changed = style.trackedCheckbox(self.object, "##splineIgnoreNavigation", self.splineIgnoreNavigation)
+        style.tooltip("On: follows the curve exactly, even through geometry.\nOff: follows the navmesh and stops at obstacles. Use this to test if the spline is walkable.")
+        if changed and self._followerCommand then
+            self._followerCommand.ignoreNavigation = self.splineIgnoreNavigation
+        end
+
+        style.mutedText("Time Dilation")
+        ImGui.SameLine()
+        ImGui.SetCursorPosX(previewPropertyWidth)
+        self.splineFollowerSpeed, changed, _ = style.trackedDragFloat(self.object, "##splineFollowerSpeed", self.splineFollowerSpeed, 0.1, 0, 5, "%.2f", 60)
+        style.tooltip("Change animation speed.")
+        if changed and npc then
+            npc:SetIndividualTimeDilation("", self.splineFollowerSpeed)
+        end
+        ImGui.SameLine()
+        style.pushButtonNoBG(true)
+
+        ImGui.PushID("saveSpeed")
+        if ImGui.Button(IconGlyphs.ContentSaveSettingsOutline) then
+            settings.defaultAISpotSpeed = self.splineFollowerSpeed
+            settings.save()
+        end
+        ImGui.PopID()
+
+        style.tooltip("Save this speed as the default for Spline previews.")
+        style.pushButtonNoBG(false)
 
         ImGui.TreePop()
     end
