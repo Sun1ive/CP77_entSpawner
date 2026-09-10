@@ -55,3 +55,11 @@ data/HollywoodCliffhanger (2).json
 data/spawnables/mesh/all/custom.txt
 .redscript
 __folder_managed_by_vortex
+
+
+# dll external resources
+raw/**/vendor
+raw/red4ext/WorldBuilderTools/build/.*
+raw/red4ext/WorldBuilderTools/build/*ninja*
+raw/red4ext/WorldBuilderTools/**/*cmake*
+raw/red4ext/WorldBuilderTools/**/*cache*
