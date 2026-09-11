@@ -732,13 +732,30 @@ function spawnedUI.findCommonParent(elements)
     return spawnedUI.getElementByPath(commonPath)
 end
 
+---The group an element spawns into: itself when it can hold children, its parent otherwise.
+---@param element element
+---@return element
+local function getSpawnTargetGroup(element)
+    if element.expandable then return element end
+    return element.parent
+end
+
+---Whether new spawns currently go into the group of the given element.
+---@param element element
+---@return boolean
+function spawnedUI.isElementSpawnNewTarget(element)
+    return spawnedUI.spawner.baseUI.spawnUI.getSpawnTargetParent() == getSpawnTargetGroup(element)
+end
+
+---Sends new spawns back to the root, clearing the spawn target group.
+function spawnedUI.clearSpawnNewTarget()
+    spawnedUI.spawner.baseUI.spawnUI.selectedGroup = 0
+end
+
 ---Sets the specified element as the new target for spawning
 ---@param element element
 function spawnedUI.setElementSpawnNewTarget(element)
-    local elementPath = element:getPath()
-    if not element.expandable then
-        elementPath = element.parent:getPath()
-    end
+    local elementPath = getSpawnTargetGroup(element):getPath()
 
     spawnedUI.ensureCache()
 
@@ -1196,11 +1213,17 @@ function spawnedUI.registerHotkeys()
     input.registerImGuiHotkey({ ImGuiKey.N, ImGuiKey.LeftCtrl }, function ()
         if hasActiveNameEdit() then return end
         if #spawnedUI.selectedPaths == 0 then
-            spawnedUI.spawner.baseUI.spawnUI.selectedGroup = 0
+            spawnedUI.clearSpawnNewTarget()
             return
         end
 
-        spawnedUI.setElementSpawnNewTarget(spawnedUI.selectedPaths[1].ref)
+        -- Same key both ways, matching the context menu entry it shares its shortcut with.
+        local target = spawnedUI.selectedPaths[1].ref
+        if spawnedUI.isElementSpawnNewTarget(target) then
+            spawnedUI.clearSpawnNewTarget()
+        else
+            spawnedUI.setElementSpawnNewTarget(target)
+        end
     end, hotkeyRunCondition)
 
     input.registerImGuiHotkey({ ImGuiKey.F, ImGuiKey.LeftCtrl }, function ()
@@ -1818,6 +1841,42 @@ function spawnedUI.warnIfLinkedProjects(elements)
     return true
 end
 
+---@param element element
+local function copyOriginAndIdentity(element)
+    local pos = element:getPosition()
+    local rot = element:getRotation()
+    utils.insertClipboardValue("position", { x = pos.x, y = pos.y, z = pos.z })
+    utils.insertClipboardValue("rotation", { roll = rot.roll, pitch = rot.pitch, yaw = rot.yaw })
+end
+
+---Draws the origin / identity clipboard row. Only groups have an origin to paste into, so
+---everything else gets a copy-only row.
+---@param element element
+local function drawOriginIdentityRow(element)
+    local buttons = {
+        { icon = IconGlyphs.ContentCopy, label = "Copy", onClick = function() copyOriginAndIdentity(element) end }
+    }
+
+    if utils.isA(element, "positionableGroup") then
+        local copiedOrigin = utils.getClipboardValue("position")
+        local copiedIdentity = utils.getClipboardValue("rotation")
+
+        table.insert(buttons, {
+            icon = IconGlyphs.ContentPaste,
+            label = "Paste",
+            disabled = copiedOrigin == nil or copiedIdentity == nil,
+            onClick = function()
+                applyElementChangesBatched({ element }, function(entry)
+                    entry:setOrigin(Vector4.new(copiedOrigin.x, copiedOrigin.y, copiedOrigin.z, 0))
+                    entry:setIdentity(copiedIdentity)
+                end)
+            end
+        })
+    end
+
+    style.drawActionButtonRow("Origin and Identity", buttons, { id = "originIdentity" })
+end
+
 ---@protected
 ---@param element element
 function spawnedUI.drawContextMenu(element, path)
@@ -1829,8 +1888,7 @@ function spawnedUI.drawContextMenu(element, path)
         local isLocked = element:isLocked()
         local canPaste = hasValidClipboardElements(spawnedUI.clipboard)
         local isDirectRootChild = element:isRootChild()
-        local activeSpawnUI = spawnedUI.spawner.baseUI.spawnUI
-        local isSpawnTarget = activeSpawnUI.getSpawnTargetParent() == element
+        local isSpawnTarget = spawnedUI.isElementSpawnNewTarget(element)
         local isEmptyGroup = utils.isA(element, "positionableGroup") and #element.childs == 0
 
         style.mutedText(isMulti and #spawnedUI.selectedPaths .. " elements" or element.name)
@@ -1898,11 +1956,13 @@ function spawnedUI.drawContextMenu(element, path)
             spawnedUI.moveToNewGroup(isMulti, element)
         end
         if utils.isA(element, "positionableGroup") then
-            ImGui.BeginDisabled(isSpawnTarget)
-            if ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.PlusBoxOutline, "Set as \"Spawn New\" group"), "CTRL-N") then
+            if isSpawnTarget then
+                if ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.MinusBoxOutline, "Unset spawn target group"), "CTRL-N") then
+                    spawnedUI.clearSpawnNewTarget()
+                end
+            elseif ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.PlusBoxOutline, "Set as spawn target group"), "CTRL-N") then
                 spawnedUI.setElementSpawnNewTarget(element)
             end
-            ImGui.EndDisabled()
             if ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.PinOutline, "Open in new window")) then
                 spawnedUI.openPinnedHierarchy(element)
             end
@@ -1921,25 +1981,39 @@ function spawnedUI.drawContextMenu(element, path)
         if utils.isA(element, "positionableGroup") then
             ImGui.EndDisabled()
             ImGui.BeginDisabled(isEmptyGroup)
-            if ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.EyeOutline, "Show all children")) then
+            local function setChildrenVisible(state)
                 applyElementChangesBatched({ element }, function(entry)
-                    entry:showDescendants(true)
+                    entry:setDescendantsVisible(state, true)
                 end)
             end
-            if ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.LockOpenVariantOutline, "Unlock all children")) then
+            style.drawActionButtonRow("Children visibility", {
+                { icon = IconGlyphs.EyeOutline, label = "Show all", onClick = function() setChildrenVisible(true) end },
+                { icon = IconGlyphs.EyeOffOutline, label = "Hide all", onClick = function() setChildrenVisible(false) end }
+            }, { id = "childrenVisibility" })
+
+            local function setChildrenLocked(state)
                 applyElementChangesBatched({ element }, function(entry)
-                    entry:unlockDescendants(true)
+                    entry:setDescendantsLocked(state, true)
                 end)
             end
-            if ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.HospitalMarker, "Show all children visualization helpers")) then
+            style.drawActionButtonRow("Children lock", {
+                { icon = IconGlyphs.LockOutline, label = "Lock all", onClick = function() setChildrenLocked(true) end },
+                { icon = IconGlyphs.LockOpenVariantOutline, label = "Unlock all", onClick = function() setChildrenLocked(false) end }
+            }, { id = "childrenLock" })
+
+            local function setChildrenVisualization(state)
                 local targets = {}
                 collectVisualizationTargetsRecursive(element, targets)
                 applyElementChangesBatched(targets, function(entry)
                     if spawnedUI.canToggleVisualization(entry) then
-                        entry.spawnable:setPreview(true)
+                        entry.spawnable:setPreview(state)
                     end
                 end)
             end
+            style.drawActionButtonRow("Children visualization helpers", {
+                { icon = IconGlyphs.HospitalMarker, label = "Show all", onClick = function() setChildrenVisualization(true) end },
+                { icon = IconGlyphs.MapMarkerOffOutline, label = "Hide all", onClick = function() setChildrenVisualization(false) end }
+            }, { id = "childrenVisualization" })
             ImGui.EndDisabled()
             ImGui.BeginDisabled(isLocked)
 
@@ -1963,22 +2037,7 @@ function spawnedUI.drawContextMenu(element, path)
                     entry:setOrigin(GetPlayer():GetWorldPosition())
                 end)
             end
-            if ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.ContentCopy, "Copy Origin and Identity")) then
-                local pos = element:getPosition()
-                local rot = element:getRotation()
-                utils.insertClipboardValue("position", { x = pos.x, y = pos.y, z = pos.z })
-                utils.insertClipboardValue("rotation", { roll = rot.roll, pitch = rot.pitch, yaw = rot.yaw })
-            end
-            local copiedOrigin = utils.getClipboardValue("position")
-            local copiedIdentity = utils.getClipboardValue("rotation")
-            ImGui.BeginDisabled(copiedOrigin == nil or copiedIdentity == nil)
-            if ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.ContentPaste, "Paste Origin and Identity")) then
-                applyElementChangesBatched({ element }, function(entry)
-                    entry:setOrigin(Vector4.new(copiedOrigin.x, copiedOrigin.y, copiedOrigin.z, 0))
-                    entry:setIdentity(copiedIdentity)
-                end)
-            end
-            ImGui.EndDisabled()
+            drawOriginIdentityRow(element)
         end
         if element.parent ~= nil and utils.isA(element.parent, "positionableGroup") and not element.parent:isRoot(true) then
             ImGui.EndDisabled()
@@ -1992,11 +2051,8 @@ function spawnedUI.drawContextMenu(element, path)
         end
         ImGui.EndDisabled()
 
-        if utils.isA(element, "positionable") and not utils.isA(element, "positionableGroup") and ImGui.MenuItem(style.resolveActionLabelNoIconOnly(IconGlyphs.ContentCopy, "Copy Origin and Identity")) then
-            local pos = element:getPosition()
-            local rot = element:getRotation()
-            utils.insertClipboardValue("position", { x = pos.x, y = pos.y, z = pos.z })
-            utils.insertClipboardValue("rotation", { roll = rot.roll, pitch = rot.pitch, yaw = rot.yaw })
+        if utils.isA(element, "positionable") and not utils.isA(element, "positionableGroup") then
+            drawOriginIdentityRow(element)
         end
 
 		ImGui.Separator()
@@ -2685,7 +2741,7 @@ function spawnedUI.getStateIcons(element)
         end
 
         if selectedGroupRef == element then
-            addStateIcon(stateIcons, IconGlyphs.PlusBoxOutline, "This group is the Spawn New target")
+            addStateIcon(stateIcons, IconGlyphs.PlusBoxOutline, "This group is the spawn target group")
         end
 
         local brushSourceGroupId = editor.getBrushSourceGroupId and editor.getBrushSourceGroupId() or nil
@@ -3910,7 +3966,7 @@ function spawnedUI.drawTop()
                 shortcutMenuItem(IconGlyphs.ArrowTopLeftBoldBoxOutline, "Move selected to root", "CTRL + BACKSPACE", "hierMoveRoot")
                 shortcutMenuItem(IconGlyphs.FolderMultiplePlusOutline, "Move selected to new group", "CTRL + G", "hierMoveNewGroup")
                 shortcutMenuItem(IconGlyphs.Download, "Drop selected to floor", "CTRL + E", "hierDropToFloor")
-                shortcutMenuItem(IconGlyphs.PlusBoxOutline, "Set as \"Spawn New\" group", "CTRL + N", "hierSetSpawnNewGroup")
+                shortcutMenuItem(IconGlyphs.PlusBoxOutline, "Set / unset spawn target group", "CTRL + N", "hierSetSpawnNewGroup")
                 shortcutMenuItem(nil, "Transform (move / rotate / scale)", "LMB Drag")
                 shortcutMenuItem(nil, "Transform slow", "Hold SHIFT + LMB Drag")
                 shortcutMenuItem(nil, "Transform extra-slow", "Hold ALT + LMB Drag")
@@ -3971,7 +4027,7 @@ function spawnedUI.drawTop()
 
     ImGui.SameLine()
     ImGui.BeginDisabled(not hasHierarchy)
-    if ImGui.Button(IconGlyphs.MapMarkerPlusOutline) then
+    if ImGui.Button(IconGlyphs.HospitalMarker) then
         local targets = spawnedUI.filter ~= "" and collectVisualizationTargets(spawnedUI.filteredPaths) or collectVisualizationTargets(spawnedUI.paths)
         applyElementChangesBatched(targets, function(entry)
             if spawnedUI.canToggleVisualization(entry) then
@@ -3982,7 +4038,7 @@ function spawnedUI.drawTop()
     style.tooltip("Enable visualization helpers for all elements (or filtered elements)")
 
     ImGui.SameLine()
-    if ImGui.Button(IconGlyphs.MapMarkerMinusOutline) then
+    if ImGui.Button(IconGlyphs.MapMarkerOffOutline) then
         local targets = spawnedUI.filter ~= "" and collectVisualizationTargets(spawnedUI.filteredPaths) or collectVisualizationTargets(spawnedUI.paths)
         applyElementChangesBatched(targets, function(entry)
             if spawnedUI.canToggleVisualization(entry) then
@@ -3993,7 +4049,7 @@ function spawnedUI.drawTop()
     style.tooltip("Disable visualization helpers for all elements (or filtered elements)")
 
     ImGui.SameLine()
-    if ImGui.Button(IconGlyphs.LockPlusOutline) then
+    if ImGui.Button(IconGlyphs.LockOutline) then
         if spawnedUI.filter ~= "" then
             local targets = {}
             for _, entry in pairs(spawnedUI.filteredPaths) do
@@ -4019,7 +4075,7 @@ function spawnedUI.drawTop()
     style.tooltip("Lock all elements (or filtered elements)")
 
     ImGui.SameLine()
-    if ImGui.Button(IconGlyphs.LockOpenMinusOutline) then
+    if ImGui.Button(IconGlyphs.LockOpenVariantOutline) then
         if spawnedUI.filter ~= "" then
             local targets = {}
             for _, entry in pairs(spawnedUI.filteredPaths) do
@@ -4045,7 +4101,7 @@ function spawnedUI.drawTop()
     style.tooltip("Unlock all elements (or filtered elements)")
 
     ImGui.SameLine()
-    if ImGui.Button(IconGlyphs.EyePlusOutline) then
+    if ImGui.Button(IconGlyphs.EyeOutline) then
         if spawnedUI.filter ~= "" then
             local targets = {}
             for _, entry in pairs(spawnedUI.filteredPaths) do
@@ -4071,7 +4127,7 @@ function spawnedUI.drawTop()
     style.tooltip("Show all elements (or filtered elements)")
 
     ImGui.SameLine()
-    if ImGui.Button(IconGlyphs.EyeMinusOutline) then
+    if ImGui.Button(IconGlyphs.EyeOffOutline) then
         if spawnedUI.filter ~= "" then
             local targets = {}
             for _, entry in pairs(spawnedUI.filteredPaths) do
@@ -4153,7 +4209,7 @@ function spawnedUI.drawTop()
         elseif brushTargetIsRandomized then
             table.insert(brushIssues, "Target group must be a normal group, not a randomized group.")
         elseif not hasBrushTargetGroup then
-            table.insert(brushIssues, "No valid target group, set a normal group as \"Spawn New\" target (root is invalid).")
+            table.insert(brushIssues, "No valid target group, set a normal group as spawn target group (root is invalid).")
         end
 
         if brushReady then

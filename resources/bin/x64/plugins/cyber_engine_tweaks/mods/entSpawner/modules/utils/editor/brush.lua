@@ -1763,7 +1763,7 @@ function brushTool.attach(editor)
         return count
     end
 
-    ---Returns whether Spawn New target is a valid normal non-root group for brush painting.
+    ---Returns whether the spawn target group is a valid normal non-root group for brush painting.
     ---Target group must not be the current brush source group or inside it.
     ---@return boolean
     function editor.hasBrushValidTargetGroup()

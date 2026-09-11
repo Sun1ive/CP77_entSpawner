@@ -618,19 +618,21 @@ function element:getDescendants()
 	return descendants
 end
 
----Unlocks all descendants of self (excluding self).
+---Sets the locked state of all descendants of self (excluding self).
+---@param state boolean
 ---@param fromRecursive boolean? Indicates this call is part of a batched/multi operation.
-function element:unlockDescendants(fromRecursive)
+function element:setDescendantsLocked(state, fromRecursive)
 	for _, descendant in pairs(self:getDescendants()) do
-		descendant:setLocked(false, fromRecursive)
+		descendant:setLocked(state, fromRecursive)
 	end
 end
 
----Shows all descendants of self (excluding self).
+---Sets the visibility of all descendants of self (excluding self).
+---@param state boolean
 ---@param fromRecursive boolean? Indicates this call is part of a batched/multi operation.
-function element:showDescendants(fromRecursive)
+function element:setDescendantsVisible(state, fromRecursive)
 	for _, descendant in pairs(self:getDescendants()) do
-		descendant:setVisible(true, fromRecursive)
+		descendant:setVisible(state, fromRecursive)
 	end
 end
 

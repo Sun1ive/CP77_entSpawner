@@ -1134,6 +1134,114 @@ function style.drawIconLabelRow(icon, label, opts)
     return rowStartY
 end
 
+---@class actionRowButton
+---@field label string? Button text.
+---@field icon string? Button icon, merged with `label` per the action label display mode.
+---@field id string? Stable widget id, defaults to the row id plus the button index.
+---@field tooltip string? Tooltip shown while hovered.
+---@field disabled boolean? Disables only this button.
+---@field onClick function? Called when the button is clicked.
+
+---@class actionRowOpts
+---@field id string? Row id, keeps button ids unique when labels repeat.
+---@field disabled boolean? Disables every button of the row.
+---@field tooltip string? Tooltip for the row label.
+---@field width number? Row width, defaults to the window content width.
+---@field uniform boolean? Size all buttons like the widest one (default `true`).
+---@field mode integer? `style.actionLabelDisplayModes` override for the button labels.
+---@field separator string? Text drawn between two buttons (default `"|"`), `""` to omit it.
+
+---Draw a label followed by any number of right aligned action buttons, for options that offer
+---several actions at once instead of one `MenuItem` each. The buttons are drawn transparent with
+---the hover highlight of a menu item, so the row reads as one more entry of the popup it sits in.
+---Unlike a `MenuItem`, a button click does not close that popup.
+---@param label string Row label.
+---@param buttons actionRowButton[] Buttons, drawn left to right.
+---@param opts actionRowOpts?
+---@return integer? clicked Index of the button clicked this frame.
+function style.drawActionButtonRow(label, buttons, opts)
+    opts = opts or {}
+    local styleData = ImGui.GetStyle()
+    local spacing = styleData.ItemSpacing.x
+    local rowId = opts.id or tostring(label)
+    local separator = opts.separator or "|"
+    local labels = {}
+    local widths = {}
+    local widest = 0
+    local buttonsWidth = 0
+
+    for index, button in ipairs(buttons) do
+        local text = style.resolveActionLabelNoIconOnly(button.icon, button.label, button.id or (rowId .. "_" .. index), opts.mode)
+        labels[index] = text
+        widths[index] = ImGui.CalcTextSize(stripWidgetId(text)) + styleData.FramePadding.x * 2
+        widest = math.max(widest, widths[index])
+    end
+
+    for index = 1, #widths do
+        if opts.uniform ~= false then
+            widths[index] = widest
+        end
+        buttonsWidth = buttonsWidth + widths[index]
+    end
+
+    local separatorWidth = separator ~= "" and ImGui.CalcTextSize(separator) or 0
+    buttonsWidth = buttonsWidth + math.max(0, #buttons - 1) * (separatorWidth + spacing * 2)
+
+    local labelText = label ~= nil and tostring(label) or ""
+    local labelWidth = labelText ~= "" and ImGui.CalcTextSize(labelText) or 0
+    local rowStartX = ImGui.GetCursorPosX()
+    -- The row grows the window instead of overlapping the label when the buttons do not fit.
+    local rowWidth = math.max(opts.width or ImGui.GetWindowContentRegionWidth(), labelWidth + spacing * 2 + buttonsWidth)
+
+    -- The buttons are selectables, the widget a `MenuItem` is built from, so their height and hover
+    -- highlight are the ones of every other entry of the popup instead of a taller framed button.
+    local selectableFlags = 0
+    if ImGuiSelectableFlags then
+        -- Clicking keeps the popup open. The flag was renamed in newer ImGui versions.
+        selectableFlags = ImGuiSelectableFlags.DontClosePopups or ImGuiSelectableFlags.NoAutoClosePopups or 0
+    end
+
+    ImGui.PushStyleVar(ImGuiStyleVar.SelectableTextAlign, 0.5, 0.5)
+
+    style.mutedText(labelText)
+    if opts.tooltip then
+        style.tooltip(opts.tooltip)
+    end
+
+    local clicked = nil
+
+    ImGui.BeginDisabled(opts.disabled == true)
+    for index, button in ipairs(buttons) do
+        ImGui.SameLine()
+
+        if index == 1 then
+            ImGui.SetCursorPosX(rowStartX + rowWidth - buttonsWidth)
+        elseif separatorWidth > 0 then
+            style.mutedText(separator)
+            ImGui.SameLine()
+        end
+
+        ImGui.BeginDisabled(button.disabled == true)
+        if ImGui.Selectable(labels[index], false, selectableFlags, widths[index], 0) then
+            clicked = index
+
+            if button.onClick then
+                button.onClick()
+            end
+        end
+        ImGui.EndDisabled()
+
+        if button.tooltip then
+            style.tooltip(button.tooltip)
+        end
+    end
+    ImGui.EndDisabled()
+
+    ImGui.PopStyleVar()
+
+    return clicked
+end
+
 ---Push or pop a no-background button style preset.
 ---Use `true` before drawing buttons and `false` after.
 ---@param push boolean `true` to push style, `false` to pop it.

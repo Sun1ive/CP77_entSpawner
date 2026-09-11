@@ -3067,7 +3067,7 @@ function spawnUI.drawTargetGroupSelector()
     ImGui.SameLine()
 	ImGui.PushItemWidth(200 * style.viewSize)
 	spawnUI.selectedGroup = ImGui.Combo("##newSpawnGroup", spawnUI.selectedGroup, groups, #groups)
-    style.comboValueTooltip(spawnUI.selectedGroup, groups, "Automatically place any newly spawned object into the selected group.\nPress CTRL-N in \"Spawned\" tab to set this selector to the currently selected group.")
+    style.comboValueTooltip(spawnUI.selectedGroup, groups, "Automatically place any newly spawned object into the selected group.\nPress CTRL-N in \"Spawned\" tab to set or unset this selector to the currently selected group.")
     ImGui.EndGroup()
 	ImGui.PopItemWidth()
 end
