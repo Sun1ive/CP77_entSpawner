@@ -31,6 +31,8 @@ local lengthIntegrationMaxDepth = 18
 local followerGeometryInterval = 0.25
 -- Delay before removing a character that reached the end.
 local followerCleanupDelay = 2
+-- Minimum gap between restarts of a finished run.
+local followerRestartInterval = 0.35
 
 ---Class for worldSplineNode
 ---@class spline : visualized
@@ -49,6 +51,7 @@ local followerCleanupDelay = 2
 ---@field protected _followerIssue string? Preview start error shown in the UI.
 ---@field protected _followerPlaying boolean Runtime-only preview state.
 ---@field protected _followerCleanupID number? Pending cleanup Cron handle.
+---@field protected _followerRestartTimer number Cooldown before a finished run restarts.
 ---@field protected _followerResume boolean Resume the preview after respawn.
 ---@field npcID entEntityID
 ---@field npcSpawning boolean
@@ -100,6 +103,7 @@ function spline:new()
     o._followerCleanupID = nil
     o._followerResume = false
     o._followerRebuildTimer = 0
+    o._followerRestartTimer = 0
     o.curvePreviewSamples = math.floor(math.max(minCurvePreviewSamples, math.min(maxCurvePreviewSamples, settings.defaultSplineCurveQuality or 12)))
     o._curvePreviewComponentCount = 0
 
@@ -436,18 +440,49 @@ function spline:getFollowerSplineDefs()
     return defs
 end
 
+---Returns the geometry written to the preview node.
+---A looped spline goes in as an open spline that ends on a copy of its first
+---marker: a node with `looped` set has no distinct end point, so the follow
+---command completes at once and the character never leaves the start.
+---@return table defs, boolean looped
+function spline:getFollowerWriteDefs()
+    local defs = self:getFollowerSplineDefs()
+    if not self.looped or #defs < 2 then return defs, false end
+
+    local closed = self:buildPreviewSplineMarkerDefs(defs)
+    local first = closed[1]
+
+    closed[#closed + 1] = {
+        position = { x = first.position.x, y = first.position.y, z = first.position.z },
+        tangentIn = { x = first.tangentIn.x, y = first.tangentIn.y, z = first.tangentIn.z },
+        tangentOut = { x = first.tangentOut.x, y = first.tangentOut.y, z = first.tangentOut.z },
+        automaticTangents = first.automaticTangents
+    }
+
+    -- The wrap-around tangents are already fitted, so keep the engine from
+    -- refitting the seam as an open spline. Without the native setter the
+    -- tangents cannot be written at all and the fit stays in place.
+    if splinePool.hasNativeTangents() then
+        for _, def in ipairs(closed) do
+            def.automaticTangents = false
+        end
+    end
+
+    return closed, false
+end
+
 ---Writes changed marker geometry to the preview node.
 ---@return boolean written
 function spline:refreshFollowerGeometry()
     if not self._followerSlot then return false end
 
-    local defs = self:getFollowerSplineDefs()
+    local defs, looped = self:getFollowerWriteDefs()
     if #defs < 2 then return false end
 
-    local signature = geometrySignature(defs, self.looped)
+    local signature = geometrySignature(defs, looped)
     if signature == self._followerSignature then return false end
 
-    if not splinePool.write(self._followerSlot, defs, self.looped) then return false end
+    if not splinePool.write(self._followerSlot, defs, looped) then return false end
 
     self._followerSignature = signature
     return true
@@ -465,8 +500,9 @@ end
 
 ---Starts movement on the placeholder spline node.
 ---@param npc gameObject
+---@param fromStart boolean? Begin at the first marker instead of the closest point.
 ---@return boolean sent
-function spline:sendSplineCommand(npc)
+function spline:sendSplineCommand(npc, fromStart)
     local slot = self._followerSlot
     local aiController = npc and npc:GetAIControllerComponent()
     if not slot or not aiController then return false end
@@ -477,7 +513,9 @@ function spline:sendSplineCommand(npc)
     -- Direction belongs to the command, not the node data.
     cmd.reverse = self.reverse and true or false
     cmd.ignoreNavigation = self.splineIgnoreNavigation and true or false
-    cmd.startFromClosestPoint = true
+    -- A new lap starts at the first marker: on a closed path the character
+    -- stands on the seam, where the closest point is just as likely to be the end.
+    cmd.startFromClosestPoint = not fromStart
     -- Re-read the spline while walking to follow marker edits.
     cmd.splineRecalculation = true
     cmd.snapToTerrain = true
@@ -1028,6 +1066,7 @@ function spline:onNPCSpawned(npc)
     end
 
     self._followerRebuildTimer = 0
+    self._followerRestartTimer = followerRestartInterval
 
     self.cronID = Cron.OnUpdate(function()
         if not self.npcID or not self:isSpawned() or not self._followerPlaying then return end
@@ -1035,18 +1074,27 @@ function spline:onNPCSpawned(npc)
         local follower = self:getNPC()
         if not follower then return end
 
+        local delta = Cron.deltaTime or 0
+
         -- Periodically sync dragged markers into the active walk.
         local moved = false
-        self._followerRebuildTimer = (self._followerRebuildTimer or 0) + (Cron.deltaTime or 0)
+        self._followerRebuildTimer = (self._followerRebuildTimer or 0) + delta
         if self._followerRebuildTimer >= followerGeometryInterval then
             self._followerRebuildTimer = 0
             moved = self:refreshFollowerGeometry()
         end
 
+        self._followerRestartTimer = math.max(0, (self._followerRestartTimer or 0) - delta)
+
         -- Restart looped or edited runs; finish completed open splines.
         if not self:isFollowerCommandRunning() and not self._followerCleanupID then
             if self.looped or moved then
-                self:sendSplineCommand(follower)
+                -- A command that ends right away would otherwise be re-sent every
+                -- frame, pinning the character in place.
+                if self._followerRestartTimer <= 0 then
+                    self._followerRestartTimer = followerRestartInterval
+                    self:sendSplineCommand(follower, self.looped and not moved)
+                end
             else
                 -- Briefly hold at the end before cleanup.
                 self._followerCommand = nil
@@ -1175,6 +1223,7 @@ function spline:stopPreviewNPC()
 
     self._followerCommand = nil
     self._followerRebuildTimer = 0
+    self._followerRestartTimer = 0
     self._followerSignature = nil
     self._followerPlaying = false
 
@@ -1409,7 +1458,7 @@ function spline:draw()
             if ImGui.Button(IconGlyphs.Play .. " Play##splineFollower", 120 * style.viewSize, 0) and spawned then
                 self:startPreviewNPC()
             end
-            style.tooltip("Walks a character along the spline using the game's own spline movement, so\nthe path shown is the one an AIMoveOnSpline command would take.\nAn open spline clears itself a couple of seconds after the character arrives.")
+            style.tooltip("Walks the NPC along the spline.\nThe NPC disappears 2 seconds after it arrives.")
         end
         style.popGreyedOut(not spawned)
 
@@ -1461,7 +1510,7 @@ function spline:draw()
         ImGui.SameLine()
         ImGui.SetCursorPosX(previewPropertyWidth)
         self.splineIgnoreNavigation, changed = style.trackedCheckbox(self.object, "##splineIgnoreNavigation", self.splineIgnoreNavigation)
-        style.tooltip("On: follows the curve exactly, even through geometry.\nOff: follows the navmesh and stops at obstacles. Use this to test if the spline is walkable.")
+        style.tooltip("On: follows the curve exactly, even through geometry.\nOff: follows the navmesh and stops at obstacles.")
         if changed and self._followerCommand then
             self._followerCommand.ignoreNavigation = self.splineIgnoreNavigation
         end
