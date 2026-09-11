@@ -640,7 +640,49 @@ local TYPE_MAP = {
         replacer = true
     },
     ["worldStaticDecalNode"] = {
-        data = "materialPath",
+        dataRetrieval = function(node)
+            local native = getNativeNode(node, "isStretchingEnabled")
+
+            -- Red Hot Tools resolves the material itself; reading the node is the fallback.
+            local material = type(node and node.materialPath) == "string" and node.materialPath or ""
+            if material == "" then
+                local hash = safeGet(safeGet(native, "material"), "hash")
+                if hash then
+                    material = ResRef.FromHash(hash):ToString()
+                end
+            end
+
+            if material == "" then
+                return nil
+            end
+
+            local data = { spawnData = material }
+            if not native then
+                return data
+            end
+
+            data.alpha = utils.toNumber(safeGet(native, "alpha"), 1)
+            data.autoHideDistance = utils.toNumber(safeGet(native, "autoHideDistance"), 20)
+            data.horizontalFlip = utils.toBoolean(safeGet(native, "horizontalFlip"), false)
+            data.verticalFlip = utils.toBoolean(safeGet(native, "verticalFlip"), false)
+            data.isStretchingEnabled = utils.toBoolean(safeGet(native, "isStretchingEnabled"), false)
+            data.orderNo = utils.toNumber(safeGet(native, "orderNo"), 0)
+            data.normalThreshold = utils.toNumber(safeGet(native, "normalThreshold"), 1)
+            data.roughnessScale = utils.toNumber(safeGet(native, "roughnessScale"), 1)
+
+            -- HDRColor channels are already normalized, unlike the 0-255 Color a light node carries.
+            local color = safeGet(native, "diffuseColorScale")
+            if color then
+                data.diffuseColorScale = {
+                    utils.toNumber(safeGet(color, "Red"), 1),
+                    utils.toNumber(safeGet(color, "Green"), 1),
+                    utils.toNumber(safeGet(color, "Blue"), 1),
+                    utils.toNumber(safeGet(color, "Alpha"), 1)
+                }
+            end
+
+            return data
+        end,
         category = "Deco",
         sub = "Decals",
         replacer = true

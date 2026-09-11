@@ -7,6 +7,7 @@ local builder = require("modules/utils/game/entityBuilder")
 local preview = require("modules/utils/preview/previewUtils")
 local utils = require("modules/utils/core/utils")
 local colorUtil = require("modules/utils/ui/color")
+local history = require("modules/utils/project/history")
 local DECAL_VISUALIZER_THICKNESS = 0.025
 local diffuseColorScaleNormalization = {
     count = 4,
@@ -28,6 +29,9 @@ local diffuseColorScaleNormalization = {
 ---@field private scale {x: number, y: number, z: number}
 ---@field private diffuseColorScale number[]
 ---@field private isStretchingEnabled boolean
+---@field private orderNo number
+---@field private normalThreshold number
+---@field private roughnessScale number
 ---@field private isTiling boolean
 ---@field private maxPropertyWidth number
 local decal = setmetatable({}, { __index = visualized })
@@ -50,6 +54,9 @@ function decal:new()
     o.scale = { x = 1, y = 1, z = 1 }
     o.diffuseColorScale = { 1, 1, 1, 1 }
     o.isStretchingEnabled = false
+    o.orderNo = 0
+    o.normalThreshold = 1
+    o.roughnessScale = 1
 
     o.assetPreviewType = "backdrop"
     o.assetPreviewDelay = 0.05
@@ -80,6 +87,9 @@ function decal:onAssemble(entity)
     component.autoHideDistance = self.autoHideDistance
     component.aspectRatio = 1
     component.isStretchingEnabled = self.isStretchingEnabled
+    component.orderNo = self.orderNo
+    component.normalThreshold = self.normalThreshold
+    component.roughnessScale = self.roughnessScale
     component.name = "decal"
     component.visualScale = Vector3.new(self.scale.x, self.scale.y, self.scale.z)
 
@@ -172,6 +182,9 @@ function decal:save()
     data.autoHideDistance = self.autoHideDistance
     data.scale = { x = self.scale.x, y = self.scale.y, z = self.scale.z }
     data.isStretchingEnabled = self.isStretchingEnabled
+    data.orderNo = self.orderNo
+    data.normalThreshold = self.normalThreshold
+    data.roughnessScale = self.roughnessScale
     data.diffuseColorScale = {
         self.diffuseColorScale[1],
         self.diffuseColorScale[2],
@@ -259,7 +272,7 @@ function decal:draw()
     spawnable.draw(self)
 
     if not self.maxPropertyWidth then
-        self.maxPropertyWidth = utils.getTextMaxWidth({ "Visualize outline", "Alpha", "Vertical Flip", "Horizontal Flip", "Stretching Enabled", "Auto Hide Distance", "Diffuse Color Scale" }) + 2 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
+        self.maxPropertyWidth = utils.getTextMaxWidth({ "Visualize outline", "Alpha", "Vertical Flip", "Horizontal Flip", "Stretching Enabled", "Auto Hide Distance", "Order No", "Normal Threshold", "Roughness Scale", "Diffuse Color Scale" }) + 2 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
     end
 
     self:drawPreviewCheckbox("Visualize outline", self.maxPropertyWidth)
@@ -294,6 +307,27 @@ function decal:draw()
     ImGui.SetCursorPosX(self.maxPropertyWidth)
     self.autoHideDistance = style.trackedDragFloat(self.object, "##autoHideDistance", self.autoHideDistance, 0.05, 0, 9999, "%.2f", 85)
 
+    style.mutedText("Order No")
+    style.tooltip("Sort order for overlapping decals. Higher numbers draw on top.")
+    ImGui.SameLine()
+    ImGui.SetCursorPosX(self.maxPropertyWidth)
+    self.orderNo, _, deactivatedAfterEdit = style.trackedDragInt(self.object, "##orderNo", self.orderNo, 0, 65535, 85)
+    self:updateFull(deactivatedAfterEdit)
+
+    style.mutedText("Normal Threshold")
+    style.tooltip("Maximum angle, in degrees, between the decal and a surface for it to project onto it.")
+    ImGui.SameLine()
+    ImGui.SetCursorPosX(self.maxPropertyWidth)
+    self.normalThreshold, _, deactivatedAfterEdit = style.trackedDragFloat(self.object, "##normalThreshold", self.normalThreshold, 0.05, 0, 90, "%.2f", 85)
+    self:updateFull(deactivatedAfterEdit)
+
+    style.mutedText("Roughness Scale")
+    style.tooltip("Multiplier applied to the roughness of the surface underneath the decal.")
+    ImGui.SameLine()
+    ImGui.SetCursorPosX(self.maxPropertyWidth)
+    self.roughnessScale, _, deactivatedAfterEdit = style.trackedDragFloat(self.object, "##roughnessScale", self.roughnessScale, 0.01, 0, 100, "%.2f", 85)
+    self:updateFull(deactivatedAfterEdit)
+
     style.mutedText("Diffuse Color Scale")
     ImGui.SameLine()
     ImGui.SetCursorPosX(self.maxPropertyWidth)
@@ -305,6 +339,69 @@ end
 
 function decal:getProperties()
     return self:addNodeProperty(spawnable.getProperties(self))
+end
+
+function decal:getGroupedProperties()
+    local properties = visualized.getGroupedProperties(self)
+
+    properties["decalProperties"] = {
+        name = "Decal",
+        id = "decal",
+        data = {
+            alpha = 1,
+            diffuseColorScale = { 1, 1, 1, 1 },
+            maxPropertyWidth = nil
+        },
+        draw = function (element, entries)
+            local data = element.groupOperationData["decalProperties"]
+
+            if not data.maxPropertyWidth then
+                data.maxPropertyWidth = utils.getTextMaxWidth({ "Alpha", "Diffuse Color Scale" }) + 2 * ImGui.GetStyle().ItemSpacing.x + ImGui.GetCursorPosX()
+            end
+
+            style.mutedText("Alpha")
+            ImGui.SameLine()
+            ImGui.SetCursorPosX(data.maxPropertyWidth)
+            data.alpha = style.trackedDragFloat(nil, "##groupDecalAlpha", data.alpha, 0.01, 0, 100, "%.2f", 85)
+            ImGui.SameLine()
+            if ImGui.Button("Apply##groupDecalAlpha") then
+                history.addAction(history.getMultiSelectChange(entries))
+
+                for _, entry in ipairs(entries) do
+                    entry.spawnable.alpha = data.alpha
+                    entry.spawnable:updateFull(true)
+                end
+
+                ImGui.ShowToast(ImGui.Toast.new(ImGui.ToastType.Success, 2500, string.format("Applied alpha to %s decals", #entries)))
+            end
+            style.tooltip("Set Alpha on every decal in the group.")
+
+            style.mutedText("Diffuse Color Scale")
+            ImGui.SameLine()
+            ImGui.SetCursorPosX(data.maxPropertyWidth)
+            data.diffuseColorScale = style.trackedColorAlpha(nil, "##groupDecalDiffuseColorScale", data.diffuseColorScale, 60)
+            ImGui.SameLine()
+            if ImGui.Button("Apply##groupDecalDiffuseColorScale") then
+                history.addAction(history.getMultiSelectChange(entries))
+
+                -- A fresh table per decal: one shared table would alias every decal to the widget.
+                for _, entry in ipairs(entries) do
+                    entry.spawnable.diffuseColorScale = {
+                        data.diffuseColorScale[1],
+                        data.diffuseColorScale[2],
+                        data.diffuseColorScale[3],
+                        data.diffuseColorScale[4]
+                    }
+                end
+
+                ImGui.ShowToast(ImGui.Toast.new(ImGui.ToastType.Success, 2500, string.format("Applied diffuse color scale to %s decals", #entries)))
+            end
+            style.tooltip("Set Diffuse Color Scale on every decal in the group.\nExport only, WB preview does not show it.")
+        end,
+        entries = { self.object }
+    }
+
+    return properties
 end
 
 function decal:export()
@@ -325,6 +422,9 @@ function decal:export()
         horizontalFlip = self.horizontalFlip and 1 or 0,
         verticalFlip = self.verticalFlip and 1 or 0,
         isStretchingEnabled = self.isStretchingEnabled and 1 or 0,
+        orderNo = self.orderNo,
+        normalThreshold = self.normalThreshold,
+        roughnessScale = self.roughnessScale,
         material = {
             DepotPath = {
                 ["$storage"] = "string",
