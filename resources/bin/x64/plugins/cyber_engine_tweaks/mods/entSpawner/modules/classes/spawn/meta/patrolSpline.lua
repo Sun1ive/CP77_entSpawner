@@ -287,6 +287,9 @@ function patrolSpline:draw()
     -- Reuse the entire basic spline UI (path, length, reverse, looped, previewing options).
     spline.draw(self)
 
+    -- The NPC preview is the basic spline's: it walks the path only, so patrol points are absent.
+    style.styledTextWrapped(IconGlyphs.AlertOutline .. "  The NPC preview only walks the spline path, the way a basic spline does. Patrol points are not part of it, so workspots and look-ats are not played.", style.extraMutedColor)
+
     ImGui.Spacing()
     self:drawPatrolPointsSection()
 end
