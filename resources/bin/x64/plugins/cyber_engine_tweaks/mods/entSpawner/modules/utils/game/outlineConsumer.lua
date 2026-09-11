@@ -1,22 +1,37 @@
 local utils = require("modules/utils/core/utils")
 
----Shared outline-group plumbing.
----
----An outline is a `positionableGroup` of `area/outlineMarker` spawnables. A consumer only needs an
----`outlinePath` field and `onOutlineChanged` method.
+---Shared support for groups of outline markers.
 ---@class outlineConsumer
 local outlineConsumer = {}
 
 outlineConsumer.MARKER_MODULE_PATH = "area/outlineMarker"
 
----An outline group has to hold at least this many markers to describe a volume.
+---Minimum markers needed to define a volume.
 outlineConsumer.MIN_MARKERS = 3
 
----Consumers bucketed by outline path per root element.
----Marker drags notify every frame, so cache with the hierarchy epoch.
+---Defaults for generated outlines.
+outlineConsumer.NEW_OUTLINE_GROUP_NAME = "outline"
+outlineConsumer.NEW_OUTLINE_RADIUS = 4
+outlineConsumer.NEW_OUTLINE_HEIGHT = 6
+
+---Returns counter-clockwise square offsets from -X/-Y.
+---@param radius number?
+---@return table[] offsets `{x, y}` pairs
+function outlineConsumer.getSquareOffsets(radius)
+    local r = tonumber(radius) or outlineConsumer.NEW_OUTLINE_RADIUS
+
+    return {
+        { x = -r, y = -r },
+        { x = r, y = -r },
+        { x = r, y = r },
+        { x = -r, y = r }
+    }
+end
+
+---Caches consumers by root and outline path.
 local outlineConsumerCache = setmetatable({}, { __mode = "k" })
 
----Bump when a consumer chooses a different outline path.
+---Incremented when an outline binding changes.
 local outlineConsumerEpoch = 0
 
 function outlineConsumer.invalidate()
@@ -75,7 +90,7 @@ local function getConsumers(root, sUI)
     return byPath
 end
 
----Notifies every consumer that references an outline group.
+---Notifies consumers that reference an outline group.
 ---@param object element Element inside the outline group, usually an outline marker.
 ---@param parentOverride element? Group to notify for, when the marker just left or entered one.
 function outlineConsumer.notifyChanged(object, parentOverride)
@@ -97,7 +112,7 @@ function outlineConsumer.notifyChanged(object, parentOverride)
     end
 end
 
----Every outline group under the consumer's own root.
+---Returns outline paths under the consumer's root.
 ---@param consumer table Spawnable with an `object` element
 ---@return string[]
 function outlineConsumer.loadPaths(consumer)
@@ -137,35 +152,52 @@ function outlineConsumer.loadPaths(consumer)
         end
     end
 
+    -- Keep an incomplete selected outline in the list while drawing it.
+    local own = outlineConsumer.getGroup(consumer)
+    if own and utils.indexValue(paths, consumer.outlinePath) == -1 then
+        table.insert(paths, consumer.outlinePath)
+    end
+
     return paths
 end
 
----Marker world positions and outline height, read live from the hierarchy.
----Uses direct path lookup because device bindings can refresh while dragged.
+---Resolves the bound outline within the consumer's root.
 ---@param consumer table Spawnable with `object` and `outlinePath`
----@return table[] markers World-space `{x, y, z}` tables, in group order
----@return number height
-function outlineConsumer.getMarkers(consumer)
-    local markers = {}
-    local height = 0
-
+---@return element? outlineGroup
+function outlineConsumer.getGroup(consumer)
     local object = consumer and consumer.object or nil
     local path = consumer and consumer.outlinePath or nil
 
     if not object or not path or path == "" or path == "None" then
-        return markers, height
+        return nil
     end
 
     local sUI = object.sUI
     local outline = sUI and sUI.getElementByPath and sUI.getElementByPath(path) or nil
 
     if not outline or not outline.childs then
-        return markers, height
+        return nil
     end
 
-    -- Cross-root paths are stale bindings, not usable outlines.
+    -- Reject stale cross-root bindings.
     local ownRoot = object.getRootParent and object:getRootParent() or nil
     if not ownRoot or not outline.getRootParent or outline:getRootParent() ~= ownRoot then
+        return nil
+    end
+
+    return outline
+end
+
+---Returns live marker positions and outline height.
+---@param consumer table Spawnable with `object` and `outlinePath`
+---@return table[] markers World-space `{x, y, z}` tables, in group order
+---@return number height
+function outlineConsumer.getMarkers(consumer)
+    local markers = {}
+    local height = 0
+    local outline = outlineConsumer.getGroup(consumer)
+
+    if not outline then
         return markers, height
     end
 
@@ -187,8 +219,7 @@ function outlineConsumer.getMarkers(consumer)
     return markers, height
 end
 
----Outline points relative to a node's own position.
----`AreaShapeOutline.points` stores local offsets, not world coordinates.
+---Returns outline points relative to the consumer.
 ---@param consumer table Spawnable with `object`, `outlinePath` and `position`
 ---@return table[] points `Vector3` tables ready for `AreaShapeOutline.points`
 ---@return number height
@@ -235,10 +266,49 @@ local function getNextChildName(parent, namePrefix)
     end
 end
 
----Creates an outline marker group around a consumer.
+---Adds a marker; only the first marker uses the supplied height.
+---@param consumer table Spawnable with an `object` element
+---@param outlineGroup element Group to append to
+---@param position Vector4|table World position
+---@param height number? Height of the first marker, defaults to `NEW_OUTLINE_HEIGHT`
+---@return element? markerElement
+function outlineConsumer.addMarker(consumer, outlineGroup, position, height)
+    if not consumer or not consumer.object or not outlineGroup or not position then
+        return nil
+    end
+
+    local spawnableElement = require("modules/classes/editor/spawnableElement")
+    local markerClass = require("modules/classes/spawn/area/outlineMarker")
+    local index = 1
+
+    for _, child in ipairs(outlineGroup.childs or {}) do
+        if isMarker(child) then
+            index = index + 1
+        end
+    end
+
+    local marker = markerClass:new()
+    marker:loadSpawnData(
+        { height = tonumber(height) or outlineConsumer.NEW_OUTLINE_HEIGHT },
+        Vector4.new(position.x or 0, position.y or 0, position.z or 0, 0),
+        EulerAngles.new(0, 0, 0)
+    )
+
+    local markerElement = spawnableElement:new(consumer.object.sUI)
+    markerElement:load({
+        name = string.format("marker_%02d", index),
+        spawnable = marker:save(),
+        modulePath = "modules/classes/editor/spawnableElement"
+    })
+    markerElement:setParent(outlineGroup)
+
+    return markerElement
+end
+
+---Creates an outline marker group for a consumer.
 ---@param consumer table Spawnable with `object` and `position`
 ---@param parent element
----@param options table? `{ namePrefix, offsets, height }`
+---@param options table? `{ namePrefix, offsets, height }`, no offsets creating an empty group
 ---@return element? outlineGroup
 function outlineConsumer.createMarkerGroup(consumer, parent, options)
     if not consumer or not consumer.object or not parent then
@@ -247,36 +317,20 @@ function outlineConsumer.createMarkerGroup(consumer, parent, options)
 
     local opts = options or {}
     local positionableGroup = require("modules/classes/editor/positionableGroup")
-    local spawnableElement = require("modules/classes/editor/spawnableElement")
-    local markerClass = require("modules/classes/spawn/area/outlineMarker")
     local outlineGroup = positionableGroup:new(consumer.object.sUI)
     local height = tonumber(opts.height) or 0
     local position = consumer.position or { x = 0, y = 0, z = 0 }
 
-    outlineGroup.name = getNextChildName(parent, opts.namePrefix or "outline")
+    outlineGroup.name = getNextChildName(parent, opts.namePrefix or outlineConsumer.NEW_OUTLINE_GROUP_NAME)
     outlineGroup.headerOpen = true
     outlineGroup:setParent(parent)
 
-    for index, offset in ipairs(opts.offsets or {}) do
-        local marker = markerClass:new()
-        marker:loadSpawnData(
-            { height = height },
-            Vector4.new(
-                position.x + (offset.x or 0),
-                position.y + (offset.y or 0),
-                position.z + (offset.z or 0),
-                0
-            ),
-            EulerAngles.new(0, 0, 0)
-        )
-
-        local markerElement = spawnableElement:new(consumer.object.sUI)
-        markerElement:load({
-            name = string.format("marker_%02d", index),
-            spawnable = marker:save(),
-            modulePath = "modules/classes/editor/spawnableElement"
-        })
-        markerElement:setParent(outlineGroup)
+    for _, offset in ipairs(opts.offsets or {}) do
+        outlineConsumer.addMarker(consumer, outlineGroup, {
+            x = position.x + (offset.x or 0),
+            y = position.y + (offset.y or 0),
+            z = position.z + (offset.z or 0)
+        }, height)
     end
 
     return outlineGroup

@@ -1,5 +1,6 @@
 local utils = require("modules/utils/core/utils")
 local redValue = require("modules/utils/data/redValue")
+local outlineConsumer = require("modules/utils/game/outlineConsumer")
 
 ---Shared constants and helpers for the Quick Security System Setup.
 ---
@@ -945,14 +946,7 @@ securitySystem.NEW_OUTLINE_HEIGHT = 6
 ---@param radius number?
 ---@return table[] offsets `{x, y}` pairs
 function securitySystem.getNewOutlineOffsets(radius)
-    local r = tonumber(radius) or securitySystem.NEW_OUTLINE_RADIUS
-
-    return {
-        { x = -r, y = -r },
-        { x = r, y = -r },
-        { x = r, y = r },
-        { x = -r, y = r }
-    }
+    return outlineConsumer.getSquareOffsets(tonumber(radius) or securitySystem.NEW_OUTLINE_RADIUS)
 end
 
 -- Schedule ---------------------------------------------------------------------------------------

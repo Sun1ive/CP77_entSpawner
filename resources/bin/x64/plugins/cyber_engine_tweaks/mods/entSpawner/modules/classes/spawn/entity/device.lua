@@ -59,7 +59,7 @@ local propertyNames = {
 ---@field public persistent boolean
 ---@field private maxPropertyWidth number?
 ---@field public controllerComponent string
----@field public showSpeakerRangeSphere boolean Speaker only: draw the audible radius, as a sphere in the world and a ring on screen
+---@field public showSpeakerRangeSphere boolean Speaker range preview
 local device = setmetatable({}, { __index = entity })
 
 ---@param doorType string?
@@ -126,8 +126,7 @@ local function getPersistentStateClassName(componentData)
     return nil
 end
 
----Merges `override` onto a deep-copied `base` table recursively.
----Used to keep untouched default persistent-state properties when a partial override exists.
+---Recursively merges overrides into a copy of the defaults.
 ---@param base table
 ---@param override table
 ---@return table
@@ -182,7 +181,7 @@ function device:onAssemble(entRef)
 
     for _, component in pairs(entRef:GetComponents()) do
         if component:IsA("gameDeviceComponent") then
-            -- Persistent state is keyed by component name in the `.psrep`.
+            -- `.psrep` keys persistent state by component name.
             self.controllerComponent = component.name.value
 
             break
@@ -191,9 +190,7 @@ function device:onAssemble(entRef)
 
     self:updatePositionMarker()
 
-    -- Added on every speaker rather than on demand: `AddComponent` after the entity is attached is
-    -- unreliable, and a disabled mesh component costs nothing. The real radius is only read when
-    -- the sphere is actually wanted, so the common case never touches the persistent state here.
+    -- Add before attachment because late `AddComponent` calls are unreliable.
     if self.deviceClassName == soundSystemData.SPEAKER_CONTROLLER_CLASS then
         local size = self.showSpeakerRangeSphere
             and self:getSpeakerRangeSphereSize()
@@ -209,9 +206,7 @@ function device:onAssemble(entRef)
     end
 end
 
----Size of the audible-range preview sphere, read off this speaker's own `speakerSetup.range`.
----`base\spawner\sphere.mesh` is unit-radius, so the range goes in unscaled -- the same convention
----the light radius preview uses.
+---Returns the audible-range sphere scale from `speakerSetup.range`.
 ---@return { x: number, y: number, z: number }
 function device:getSpeakerRangeSphereSize()
     local setup = self:getSpeakerSetup(self)
@@ -220,8 +215,7 @@ function device:getSpeakerRangeSphereSize()
     return { x = range, y = range, z = range }
 end
 
----Rescales and shows/hides the range sphere. Safe to call on a device that is not a speaker, or on
----one that is not spawned.
+---Updates the speaker range sphere when available.
 ---@param entityRef entEntity? Defaults to this spawnable's live entity
 ---@param rangeOverride number? Live drag value, so the sphere follows the slider before it commits
 function device:updateSpeakerRangeSphere(entityRef, rangeOverride)
@@ -235,8 +229,7 @@ function device:updateSpeakerRangeSphere(entityRef, rangeOverride)
         return
     end
 
-    -- Reading the radius means reading the persistent state, so it only happens when the sphere is
-    -- going to be shown.
+    -- Read persistent state only when showing the sphere.
     if self.deviceClassName ~= soundSystemData.SPEAKER_CONTROLLER_CLASS or self.showSpeakerRangeSphere ~= true then
         if sphere:IsEnabled() then
             sphere:Toggle(false)
@@ -250,8 +243,7 @@ function device:updateSpeakerRangeSphere(entityRef, rangeOverride)
         and { x = math.max(0, override), y = math.max(0, override), z = math.max(0, override) }
         or self:getSpeakerRangeSphereSize()
 
-    -- `updateScale` re-toggles an enabled component to make the new scale take, so scale first and
-    -- let the visibility check below settle the final state.
+    -- Scale first because `updateScale` toggles enabled components.
     visualizer.updateScale(target, size, soundSystemData.RANGE_SPHERE_COMPONENT)
 
     local shouldShow = size.x > 0
@@ -275,17 +267,14 @@ function device:save()
     data.showDoorsHelper = self.showDoorsHelper
     data.showSpeakerHelper = self.showSpeakerHelper
     data.showSpeakerRangeSphere = self.showSpeakerRangeSphere
-    -- nil on every device that is not a security area, which keeps the key out of their saved data
-    -- and out of the area-node duck test in `spawnedUI`.
+    -- Keep this nil for devices that are not security areas.
     data.outlinePath = self.outlinePath
 
     return data
 end
 
 -- Outline binding --------------------------------------------------------------------------------
---
--- Security areas bind their trigger volume to an outline marker group. Other devices leave
--- `outlinePath` nil so existing area-node duck typing ignores them.
+-- Security areas bind their trigger volume to an outline marker group.
 
 ---@return boolean
 function device:isOutlineHost()
@@ -329,7 +318,7 @@ function device:getAreaShapeComponentID()
     return nil
 end
 
----Loads the rest of the components so the outline can be written. Call on popup open, not per frame.
+---Loads components needed to write an outline.
 ---@return string?
 function device:ensureAreaShapeLoaded()
     local componentID = self:getAreaShapeComponentID()
@@ -393,11 +382,9 @@ function device:onOutlineChanged()
 end
 
 -- Security network wiring ------------------------------------------------------------------------
---
--- The Quick Security `+` actions create nodes, assign NodeRefs, wire connections and record one
--- composite undo action.
+-- Quick Security actions create and connect nodes in one undo step.
 
----Creates a child device node under `parent`.
+---Creates a child device node.
 ---@param parent element
 ---@param options table `{ spawnData, app, controllerClass, namePrefix, position, rotation, persistent, deviceConnections }`
 ---@return element element
@@ -445,7 +432,7 @@ function device:createChildDeviceNode(parent, options)
     return newElement, newSpawnable
 end
 
----Creates a device node under `parent` and returns it, wired to nothing yet.
+---Creates an unconnected device node.
 ---@param parent element
 ---@param spawnData string Entity path
 ---@param controllerClass string
@@ -466,7 +453,7 @@ function device:createSecurityNode(parent, spawnData, controllerClass, namePrefi
     })
 end
 
----Adds a connection row on this device, unless one already points at the same NodeRef.
+---Adds a connection unless the NodeRef is already present.
 ---@param className string
 ---@param nodeRef string
 ---@return boolean added
@@ -493,8 +480,7 @@ function device:addSecurityConnection(className, nodeRef)
     return true
 end
 
----Spawns an outline marker group around this device and binds it.
----No history is pushed here; callers compose it with their broader action.
+---Creates and binds an outline without recording history.
 ---@param parentOverride element? Group to build under; defaults to this device's own parent
 ---@return element? outlineGroup
 function device:addSecurityOutline(parentOverride)
@@ -515,7 +501,7 @@ function device:addSecurityOutline(parentOverride)
 
     self:refreshNodeRefCaches()
 
-    -- Bind after cache refresh so the new path is valid.
+    -- Refresh the cache before resolving the new path.
     self.outlinePath = outlineGroup.getPath and outlineGroup:getPath() or ""
     outlineConsumer.invalidate()
 
@@ -526,7 +512,7 @@ function device:addSecurityOutline(parentOverride)
     return outlineGroup
 end
 
----Spawns a security area, outline markers, binding and master connection in one action.
+---Creates and connects a security area with an outline.
 ---@return element? areaElement
 function device:addSecurityArea()
     if not self.object or not self.object.parent or self.object:isLocked() then
@@ -543,9 +529,9 @@ function device:addSecurityArea()
         return nil
     end
 
-    -- Start on the system; the author can drag it into place.
+    -- Start at the system position.
     local position = Vector4.new(self.position.x, self.position.y, self.position.z, 0)
-    -- Keep new area nodes unrotated so marker offsets export directly.
+    -- Keep marker offsets directly exportable.
     local rotation = EulerAngles.new(0, 0, 0)
 
     local areaElement, areaSpawnable = self:createSecurityNode(
@@ -560,10 +546,10 @@ function device:addSecurityArea()
         return nil
     end
 
-    -- Keep markers beside the area so hierarchy moves keep them together.
+    -- Keep markers and the area in the same group.
     local outlineGroup = areaSpawnable:addSecurityOutline(parent)
 
-    -- Default new areas to the safer/common RESTRICTED type.
+    -- Use the common restrictive default.
     self:updateComponentPathValue(
         areaSpawnable,
         securitySystemData.SECURITY_AREA_COMPONENT_ID,
@@ -588,7 +574,7 @@ function device:addSecurityArea()
     return areaElement
 end
 
----Spawns one of the devices a security network drives and connects it to this device.
+---Creates and connects a security slave device.
 ---@param key string Key from `securitySystem.SLAVE_CLASSES`
 ---@param spawnData string? One of the entry's `variants` paths, or nil for its default
 ---@return element? slaveElement
@@ -643,7 +629,7 @@ function device:addSecuritySlave(key, spawnData)
     return slaveElement
 end
 
----Spawns a security system for this area and points it back here.
+---Creates a security system linked to this area.
 ---@return element? systemElement
 function device:addSecuritySystemForArea()
     if not self.object or not self.object.parent or self.object:isLocked() then
@@ -676,7 +662,7 @@ function device:addSecuritySystemForArea()
         return nil
     end
 
-    -- The script starts at TEMPORARLY, letting a provoked faction settle back after the fight.
+    -- Allow provoked factions to settle after combat.
     self:updateComponentPathValue(
         systemSpawnable,
         securitySystemData.SECURITY_SYSTEM_COMPONENT_ID,
@@ -718,7 +704,7 @@ function device:removeSecurityConnection(connectionIndex)
     return true
 end
 
----Bound outline marker group for an area, when it resolves under the same root.
+---Returns an area's bound outline within the same root.
 ---@param areaSpawnable table?
 ---@return element?
 function device:resolveSecurityOutlineGroup(areaSpawnable)
@@ -736,12 +722,11 @@ function device:resolveSecurityOutlineGroup(areaSpawnable)
         return nil
     end
 
-    -- A path that resolves into another root is a stale binding, not this area's markers.
+    -- Reject stale cross-root bindings.
     return group:getRootParent() == object:getRootParent() and group or nil
 end
 
----Removes a security connection, and optionally the target node plus its outline group.
----All rows pointing at the same NodeRef are removed.
+---Removes a connection and optionally its node and outline.
 ---@param entry table Network entry `{ connection, nodeRef, spawnable, element }`
 ---@param deleteNode boolean Remove the target element as well
 ---@return boolean removed
@@ -779,7 +764,7 @@ function device:removeSecurityNode(entry, deleteNode)
 
     local removeAction = nil
     if #removedElements > 0 then
-        -- Snapshot before detach so undo can restore original positions.
+        -- Snapshot before detaching for undo.
         removeAction = history.getRemove(removedElements)
 
         for _, element in ipairs(removedElements) do
@@ -807,7 +792,7 @@ function device:removeSecurityNode(entry, deleteNode)
 
     return true
 end
----Spawns a community node and connects it, so the network has NPCs to alert.
+---Creates and connects an NPC community.
 ---@return element? communityElement
 function device:addSecurityCommunity()
     if not self.object or not self.object.parent or self.object:isLocked() then
@@ -865,7 +850,7 @@ end
 function device:update()
     entity.update(self)
 
-    -- The points are relative to this node, so moving the device changes them too.
+    -- Points are relative to this node.
     self:refreshOutlineBinding()
 end
 
@@ -922,7 +907,7 @@ function device:resolveConnectionTargetSpawnable(nodeRef)
     local spawnable = registry.getSpawnableByNodeRef(self.object, cleanNodeRef)
     local resolvedNodeRef = cleanNodeRef
 
-    -- Support connections stored as hash strings by resolving back to the root-local NodeRef text.
+    -- Resolve stored hashes to root-local NodeRefs.
     if not spawnable and not string.find(cleanNodeRef, "%D") then
         local root = self.object and self.object:getRootParent()
         local rootRefs = root and registry.refs[root.name] or nil
@@ -938,7 +923,7 @@ function device:resolveConnectionTargetSpawnable(nodeRef)
         end
     end
 
-    -- Last-resort hierarchy walk, useful if registry cache is stale.
+    -- Fall back to the hierarchy if the registry is stale.
     if not spawnable and self.object and self.object.getRootParent then
         local root = self.object:getRootParent()
         if root and root.getPathsRecursive then
@@ -967,7 +952,7 @@ function device:refreshNodeRefCaches()
     end
 end
 
----Updates one node's NodeRef, and optionally every connection row pointing at the old ref.
+---Updates a NodeRef and optional references to its old value.
 ---@param targetSpawnable table?
 ---@param targetElement element?
 ---@param newNodeRef string
@@ -1057,7 +1042,7 @@ function device:updateNodeRefAndReferrers(targetSpawnable, targetElement, newNod
     return true
 end
 
----Device connection rows resolved to their target spawnables.
+---Resolves device connections to their target spawnables.
 ---@param sourceSpawnable table?
 ---@param options table? `{ className, excludeClasses, requireNodeRef, filter, decorate }`
 ---@return table[]
@@ -1209,11 +1194,7 @@ function device:getComponentPathValue(targetSpawnable, componentID, path)
     return nil
 end
 
----Reads an array valued path without merging it onto the default.
----`getComponentPathValue` merges by key, which is right for a struct but wrong for a variable
----length array: an override holding one entry would keep the defaults second entry trailing behind
----it, so deleting the last sound system entry would silently bring a shipped one back. An array is
----owned whole by whichever source last wrote it.
+---Reads an array override as a complete value instead of merging defaults.
 ---@param targetSpawnable entity
 ---@param componentID string
 ---@param path table
@@ -1518,38 +1499,21 @@ function device:getLiftDoorWorldPosition(doorIndex)
     return elevatorDoors.getMarkerWorldPosition(self, side)
 end
 
----Guarantees this device sits inside a `positionableGroup`, wrapping it in a new one when it does
----not, so quick setup has somewhere to put the nodes it creates.
+---Wraps this device in a group for quick-setup nodes when needed.
 ---@return element?, table? group, history action for the wrap (nil when no wrap was needed)
 function device:ensureOwnParentGroup()
-    if not self.object or not self.object.parent then
+    if not self.object then
         return nil, nil
     end
 
-    local parent = self.object.parent
-    if utils.isA(parent, "positionableGroup") then
-        return parent, nil
+    local wrapper, wrapAction = self.object:ensureParentGroup()
+
+    -- The device moved, so every path-keyed cache pointing at it is stale.
+    if wrapAction then
+        self:refreshNodeRefCaches()
     end
 
-    local index = utils.indexValue(parent.childs, self.object)
-    if type(index) ~= "number" or index < 1 then
-        index = #parent.childs + 1
-    end
-
-    local wrapper = positionableGroup:new(self.object.sUI)
-    wrapper.name = self.object.name .. "_Group"
-    wrapper.headerOpen = true
-    wrapper:setParent(parent, index)
-    parent.headerOpen = true
-
-    local insertGroup = history.getInsert({ wrapper })
-    local removeDevice = history.getRemove({ self.object })
-    self.object:setParent(wrapper)
-    local insertDevice = history.getInsert({ self.object })
-
-    self:refreshNodeRefCaches()
-
-    return wrapper, history.getMoveToNewGroup(insertGroup, removeDevice, insertDevice)
+    return wrapper, wrapAction
 end
 
 ---@return element?, table?
@@ -2244,7 +2208,7 @@ function device:getSoundSystemEntries()
     return entries, componentID
 end
 
----Writes the whole entry array back, clamping `defaultAction` so it can never point past the end.
+---Writes entries and clamps `defaultAction` to the array bounds.
 ---@param entries table[]
 ---@param componentID string?
 function device:setSoundSystemEntries(entries, componentID)
@@ -2258,8 +2222,7 @@ function device:setSoundSystemEntries(entries, componentID)
         table.insert(normalized, soundSystemData.normalizeEntry(entries[index]))
     end
 
-    -- `defaultAction` indexes this array, so a delete has to pull it back in range. Suppressed here
-    -- so the array write below stays the single respawn of the operation.
+    -- Clamp without respawning before the array write.
     local defaultAction = math.floor(tonumber(
         self:getComponentPathValue(self, componentID, soundSystemData.DEFAULT_ACTION_PATH)
     ) or 0)
@@ -2317,8 +2280,7 @@ function device:moveSoundSystemEntry(index, direction)
     self:setSoundSystemEntries(entries, componentID)
 end
 
----Replaces one entry in place. The caller hands back a whole entry rather than a path, because the
----`musicSettings` handle has to be written as a unit.
+---Replaces one complete `musicSettings` entry.
 ---@param index number
 ---@param entry table
 function device:updateSoundSystemEntry(index, entry)
@@ -2331,7 +2293,7 @@ function device:updateSoundSystemEntry(index, entry)
     self:setSoundSystemEntries(entries, componentID)
 end
 
----Speaker connections of this sound system, resolved to their spawnables where possible.
+---Returns speaker connections and their spawnables when found.
 ---@return table[]
 function device:getSpeakerEntries()
     return self:getResolvedDeviceConnections(self, {
@@ -2350,10 +2312,7 @@ function device:getSpeakerEntries()
     })
 end
 
----Connections on this sound system that point at something the game will not drive.
----`SoundSystemControllerPS.RefreshSlaves` casts every immediate slave to `SpeakerControllerPS` and
----skips the rest, so a radio or a jukebox wired here is silently ignored -- which looks exactly like
----a broken speaker and is worth saying out loud.
+---Returns connections ignored because their targets are not speakers.
 ---@return { nodeRef: string, className: string, reason: string, element: element? }[]
 function device:getIgnoredSlaveConnections()
     return self:getResolvedDeviceConnections(self, {
@@ -2367,7 +2326,7 @@ function device:getIgnoredSlaveConnections()
     })
 end
 
----First free `<prefix>_<n>` name under `parent`. Used for both speakers and masters.
+---Returns the first free `<prefix>_<n>` child name.
 ---@param parent element
 ---@param namePrefix string
 ---@return string
@@ -2394,7 +2353,7 @@ function device:getNextChildName(parent, namePrefix)
     end
 end
 
----Spawns a speaker next to this sound system, gives it a NodeRef and connects it.
+---Creates and connects a speaker with a NodeRef.
 ---@param speakerType string `speaker` or `virtual`
 function device:addSpeaker(speakerType)
     if not self.object or not self.object.parent or self.object:isLocked() then
@@ -2449,7 +2408,7 @@ function device:addSpeaker(speakerType)
     end
 end
 
----Keeps the speaker node and this systems connection row on the same NodeRef.
+---Updates a speaker and its connection to the same NodeRef.
 ---@param speakerEntry table
 ---@param newNodeRef string
 function device:updateSpeakerNodeRef(speakerEntry, newNodeRef)
@@ -2600,9 +2559,7 @@ function device:updateSpeakerSetup(speakerSpawnable, componentID, setup)
     return normalized
 end
 
----Devices in this project that drive this sound system.
----The connection lives on the master, not here, so this is a reverse lookup over the hierarchy
----rather than a read of `self.deviceConnections`.
+---Finds devices that reference this sound system.
 ---@return table[]
 function device:getSoundSystemMasters()
     local ownNodeRef = utils.sanitizeText(self.nodeRef)
@@ -2652,8 +2609,7 @@ function device:getSoundSystemMasters()
     return entries
 end
 
----Updates the NodeRef on a master node. The link to this sound system is stored on the master's
----connection row, so changing the master's own NodeRef does not touch the graph edge.
+---Updates a master's NodeRef without changing its connection.
 ---@param masterEntry table
 ---@param newNodeRef string
 function device:updateSoundSystemMasterNodeRef(masterEntry, newNodeRef)
@@ -2682,8 +2638,7 @@ function device:generateSoundSystemMasterNodeRef(masterEntry)
     self:updateSoundSystemMasterNodeRef(masterEntry, registry.generate(masterEntry.masterElement))
 end
 
----Spawns a master next to this sound system, wires it up, and -- for a computer -- sets it to open
----straight onto the sound system page.
+---Creates and configures a master for this sound system.
 ---@param masterType string Key from `soundSystemData.MASTER_DEFINITIONS`
 function device:addSoundSystemMaster(masterType)
     if not self.object or not self.object.parent or self.object:isLocked() then
@@ -2799,8 +2754,7 @@ function device:updateComputerSetup(masterSpawnable, componentID, setup)
     return normalized
 end
 
----Writes the sound-system terminal flags onto a computer, deferring until its persistent state is
----readable when it has only just been spawned.
+---Writes terminal flags once the computer state is readable.
 ---@param masterSpawnable entity
 function device:applyComputerTerminalPreset(masterSpawnable)
     if not masterSpawnable then
@@ -2835,8 +2789,7 @@ function device:applyComputerTerminalPreset(masterSpawnable)
     masterSpawnable._pendingComputerTerminalPreset = true
     if masterSpawnable.registerSpawnedAndAttachedCallback then
         masterSpawnable:registerSpawnedAndAttachedCallback(function ()
-            -- Deferred out of the attach callback, the way the lift floor setup is, to avoid the
-            -- respawn timing that hard-crashes the game there.
+            -- Defer past attachment to avoid unsafe respawn timing.
             Cron.After(0.05, function ()
                 masterSpawnable._pendingComputerTerminalPreset = nil
                 if masterSpawnable.object then
@@ -2853,13 +2806,10 @@ quickElevatorSetupUI.install(device)
 
 quickSoundSystemSetupUI.install(device)
 
--- Not gated on a specific controller class: any device whose PS derives from
--- `ScriptableDeviceComponentPS` carries a `deviceOperationsSetup`, which is most of them.
+-- Most scriptable devices expose `deviceOperationsSetup`.
 quickDeviceOperationsSetupUI.install(device)
 
--- Gated on the entity carrying a `gameTransformAnimatorComponent`, never on a device class: some
--- TRANSFORM doors ship without one (`q113_sliding_wall.ent`), and instance data overrides existing
--- components only, so the panel would have nothing to write to.
+-- Show only when the entity has a transform animator component.
 quickTransformAnimationSetupUI.install(device)
 
 -- Quick Security opens from either a system or one of its areas.
@@ -3033,8 +2983,7 @@ function device:getProperties()
                 self.showSpeakerHelper, _ = style.toggleButton(IconGlyphs.Speaker, self.showSpeakerHelper)
                 style.tooltip("Draw a link line and numbered badge for each connected speaker.\nEach speaker's audible range follows that speaker's own range toggle.")
             elseif self.deviceClassName == soundSystemData.SPEAKER_CONTROLLER_CLASS then
-                -- One toggle for one thing: the sphere in the world and the ring on screen are two
-                -- renderings of the same audible radius, so they switch together.
+                -- Toggle both views of the audible radius together.
                 style.mutedText("Show range")
                 ImGui.SameLine()
                 local newRangeSphere, rangeSphereToggled = style.toggleButton(IconGlyphs.HospitalMarker, self.showSpeakerRangeSphere)

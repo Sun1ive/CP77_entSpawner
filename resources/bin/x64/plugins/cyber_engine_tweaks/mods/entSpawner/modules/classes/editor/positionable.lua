@@ -10,7 +10,7 @@ local scatteredConfig = require("modules/classes/editor/scatteredConfig")
 
 local element = require("modules/classes/editor/element")
 
----Element with position, rotation and optionally scale, handles the rendering / editing of those. Values have to be provided by the inheriting class
+---Base class for editable position, rotation, and optional scale.
 ---@class positionable : element
 ---@field transformExpanded boolean
 ---@field rotationRelative boolean
@@ -36,14 +36,13 @@ local TRANSFORM_FAST_COLOR = 0xFF0099FF
 local TRANSFORM_SLOW_COLOR = 0xFFB8B800
 local TRANSFORM_PRECISION_COLOR = 0xFFFF66B3
 
----Transform values the element started out with, used by the reset actions on the section icons.
----`scaleLocked` already means "axes linked", hence the odd name of the scale field lock.
+---Initial transform used by reset actions.
 ---@class baseTransform
 ---@field rotation eulerLike?
 ---@field scale vec3Like?
 ---@field source string? Where the values came from, for example "prefab" or "original node"
 
----Field lock flag backing each transform section icon.
+---Maps transform sections to their lock fields.
 local TRANSFORM_SECTION_LOCKS = {
 	position = "positionLocked",
 	relative = "relativePositionLocked",
@@ -200,7 +199,7 @@ function positionable:new(sUI)
 end
 
 ---@param data table Serialized element data.
----@param silent boolean? Optional parameter to signal that this load is purely for retrieving data
+---@param silent boolean? Load without side effects
 function positionable:load(data, silent)
 	element.load(self, data, silent)
 	self.transformExpanded = data.transformExpanded
@@ -254,19 +253,19 @@ function positionable:drawTransform()
 
 	if not self.controlsHovered and self.visualizerDirection ~= "none" then
 		if not settings.gizmoOnSelected then
-			self:setVisualizerState(false) -- Set vis state first, as loading the mesh app (vis direction) can screw with it
+			self:setVisualizerState(false) -- Disable before loading the visualizer appearance.
 		end
 		self:setVisualizerDirection("none")
 		return
 	end
 
-	-- Only update once, to avoid "ghost arrows" from doing multiple LoadAppearance() calls in a single frame
+	-- Update once per frame to avoid ghost arrows.
 	if self.visualizerChanged and self.visualizerNewDirection ~= self.visualizerDirection then
 		self:setVisualizerDirection(self.visualizerNewDirection)
 	end
 end
 
----Draw the active Transform drag multiplier beside the property header.
+---Draws the active transform drag mode.
 function positionable:drawTransformModeIndicator()
 	local altDown = ImGui.IsKeyDown(ImGuiKey.LeftAlt) or ImGui.IsKeyDown(ImGuiKey.RightAlt)
 	local shiftDown = ImGui.IsKeyDown(ImGuiKey.LeftShift) or ImGui.IsKeyDown(ImGuiKey.RightShift)
@@ -488,8 +487,7 @@ end
 
 function positionable:onEdited() end
 
----Records where the element's transform started out, so the section icons can reset back to it.
----Elements built from nothing keep no base transform at all and reset to identity instead.
+---Stores the transform used by reset actions; nil values reset to identity.
 ---@param rotation eulerLike? Base rotation, identity when omitted.
 ---@param scale vec3Like? Base scale, uniform 1 when omitted.
 ---@param source string? Origin shown in the reset action, for example "prefab".
@@ -506,8 +504,7 @@ function positionable:setBaseTransform(rotation, scale, source)
 	self.baseTransform = base
 end
 
----Takes the current transform as the base one. Called right after an element was built from a
----source that defines its own transform (a prefab), before any placement offset is applied.
+---Captures the current transform before placement offsets are applied.
 ---@param source string? Origin shown in the reset action.
 function positionable:captureBaseTransform(source)
 	self:setBaseTransform(self:getRotation(), self.hasScale and self:getScale() or nil, source)
@@ -543,7 +540,7 @@ function positionable:getBaseTransformSource()
 	return source
 end
 
----Restores the rotation the element started out with.
+---Restores the base rotation.
 function positionable:resetRotation()
 	if self.rotationLocked then return end
 
@@ -552,7 +549,7 @@ function positionable:resetRotation()
 	self:onEdited()
 end
 
----Restores the scale the element started out with.
+---Restores the base scale.
 function positionable:resetScale()
 	if not self.hasScale or self.scaleFieldsLocked then return end
 
@@ -828,9 +825,7 @@ local function formatDimensions(size)
     return string.format("%.2f x %.2f x %.2f m", math.abs(x), math.abs(y), math.abs(z))
 end
 
----Dimension lines shown in the Position tooltip.
----Base dimensions only exist for asset backed spawnables, actual ones only differ from them
----once the element carries a scale, so either line can be missing on its own.
+---Returns available base and scaled dimension labels.
 ---@return string? baseLine
 ---@return string? actualLine
 function positionable:getDimensionLines()
@@ -846,7 +841,7 @@ function positionable:getDimensionLines()
     return baseLine, formatDimensions(spawnableRef:getSize())
 end
 
----Builds the tooltip of a transform section icon out of its description and the actions it offers.
+---Builds a transform section tooltip.
 ---@param lines string[] Description lines shown first.
 ---@param section string One of the `TRANSFORM_SECTION_LOCKS` keys.
 ---@param hasReset boolean Whether the icon also offers the right click reset action.
@@ -859,7 +854,7 @@ function positionable:buildTransformIconTooltip(lines, section, hasReset)
     end
     table.insert(tooltip, "")
 
-    -- First description line names the section, so the action hints can point at it.
+    -- Use the first line as the section name in action hints.
     local title = lines[1] or "transform"
     local locked = self:isTransformSectionLocked(section)
     table.insert(tooltip, string.format("Left click: %s", locked and "Enable" or "Disable"))
@@ -872,7 +867,7 @@ function positionable:buildTransformIconTooltip(lines, section, hasReset)
     return table.concat(tooltip, "\n")
 end
 
----Draws the icon heading a transform section, handling its lock toggle and reset action.
+---Draws a transform section icon with lock and reset actions.
 ---@protected
 ---@param icon string
 ---@param color number
@@ -887,12 +882,12 @@ function positionable:drawTransformSectionIcon(icon, color, section, tooltipLine
     for key, value in pairs(iconOpts or {}) do
         opts[key] = value
     end
-    -- Muted while locked, matching how the fields it disables are drawn.
+    -- Match the disabled field style.
     opts.iconColor = locked and style.mutedColor or color
 
     style.drawIconLabelRow(icon, nil, opts)
 
-    -- Captured up front: the reset popup below leaves ImGui reporting its own content as the last item.
+    -- Capture before the reset popup changes ImGui's last item.
     local hovered = ImGui.IsItemHovered()
 
     if hovered and ImGui.IsMouseClicked(ImGuiMouseButton.Left) then
@@ -925,7 +920,7 @@ function positionable:getResetActionLabel(section)
     return string.format("Reset %s to %s", section, source)
 end
 
----Rotation section icon. Also used by the group transform UI, which lays out its own row.
+---Draws the rotation section icon.
 ---@protected
 ---@param color number? Icon color, defaults to the element rotation color.
 ---@param iconOpts table? Overrides forwarded to `style.drawIconLabelRow`.
@@ -984,9 +979,7 @@ function positionable:drawProp(prop, name, axis, disableInput)
 		self.visualizerChanged = true
 	end
 
-	-- Record before closing out the interaction: a value committed with Enter reports `changed` and
-	-- `finished` on the same frame, so clearing the flag first would leave it stuck set, silencing
-	-- history (and dirty marking) for every later edit.
+	-- Record first because Enter can report changed and finished together.
 	if changed and not history.propBeingEdited then
 		history.addAction(history.getElementChange(self))
 		history.propBeingEdited = true
@@ -1358,8 +1351,37 @@ function positionable:getDirection(direction)
 	end
 end
 
----Base no-op drop. Subclasses override this; the base still has to honor `onComplete`,
----otherwise a non-droppable child stalls the async queue in `dropChildrenToSurface`.
+---Wraps this element in a `positionableGroup` when needed for sibling bindings.
+---@return element? group Group holding this element, nil when it has no parent at all.
+---@return table? wrapAction History action for the wrap, nil when no wrap was needed.
+function positionable:ensureParentGroup()
+	if not self.parent then return nil, nil end
+	if utils.isA(self.parent, "positionableGroup") then return self.parent, nil end
+
+	-- Require here to avoid the positionableGroup inheritance cycle.
+	local positionableGroup = require("modules/classes/editor/positionableGroup")
+	local parent = self.parent
+	local index = utils.indexValue(parent.childs, self)
+
+	if type(index) ~= "number" or index < 1 then
+		index = #parent.childs + 1
+	end
+
+	local wrapper = positionableGroup:new(self.sUI)
+	wrapper.name = self.name .. "_Group"
+	wrapper.headerOpen = true
+	wrapper:setParent(parent, index)
+	parent.headerOpen = true
+
+	local insertGroup = history.getInsert({ wrapper })
+	local removeSelf = history.getRemove({ self })
+	self:setParent(wrapper)
+	local insertSelf = history.getInsert({ self })
+
+	return wrapper, history.getMoveToNewGroup(insertGroup, removeSelf, insertSelf)
+end
+
+---Base no-op drop that completes the async drop queue.
 ---@param grouped boolean? True when a caller already recorded a history action.
 ---@param direction Vector4 Drop direction.
 ---@param excludeDict table<number, boolean>? Spawnable element ids the drop raycast must ignore.

@@ -4,6 +4,7 @@ local utils = require("modules/utils/core/utils")
 local logger = require("modules/utils/core/logger")
 local element = require("modules/classes/editor/element")
 local outlineConsumer = require("modules/utils/game/outlineConsumer")
+local history = require("modules/utils/project/history")
 
 ---Class for worldAreaShapeNode
 ---@class area : visualized
@@ -13,13 +14,13 @@ local outlineConsumer = require("modules/utils/game/outlineConsumer")
 ---@field protected maxPropertyWidth number
 local area = setmetatable({}, { __index = visualized })
 
----Compatibility wrappers for the shared outline consumer helper.
+---Aliases for the shared outline helper.
 
 function area.invalidateOutlineConsumers()
     outlineConsumer.invalidate()
 end
 
----Notifies every consumer referencing an outline group that its geometry changed.
+---Notifies consumers that an outline changed.
 ---@param object element Element inside the outline group, usually an outline marker.
 ---@param parentOverride element? Group to notify for, when the marker just left or entered one.
 function area.notifyOutlineChanged(object, parentOverride)
@@ -59,11 +60,10 @@ end
 function area:loadSpawnData(data, position, rotation)
     visualized.loadSpawnData(self, data, position, rotation)
 
-    -- `spawnable.loadSpawnData` assigns tables by reference, and its payloads outlive the load
-    -- (project cache, clipboard), so two areas would otherwise share one marker table.
+    -- Copy markers because load payloads may be reused.
     self.markers = utils.deepcopy(self.markers)
 
-    -- Loading a project, pasting, or undoing an edit can all point this area at a different outline.
+    -- Loads, pastes, and undo may change the binding.
     area.invalidateOutlineConsumers()
 end
 
@@ -100,6 +100,163 @@ function area:loadOutlinePaths()
     return outlineConsumer.loadPaths(self)
 end
 
+---Refreshes data derived from this area's outline.
+function area:refreshOutline()
+    element.bumpWireframeEpoch(self.object)
+    area.invalidateOutlineConsumers()
+    self:onOutlineChanged()
+end
+
+---Points this area at an outline group.
+---@param outlineGroup element
+function area:bindOutline(outlineGroup)
+    self.outlinePath = outlineGroup and outlineGroup.getPath and outlineGroup:getPath() or ""
+    self:refreshOutline()
+end
+
+---@return boolean
+function area:canEditOutline()
+    return self.object ~= nil and self.object.parent ~= nil and not self.object:isLocked()
+end
+
+---Returns a parent that lets the area and outline share a root group.
+---@return element? parent
+---@return table? wrapAction History action for the wrap, nil when no wrap was needed
+function area:getOutlineParent()
+    if not self.object then return nil, nil end
+
+    return self.object:ensureParentGroup()
+end
+
+---Builds a square outline group next to this area and binds it.
+---@return element? outlineGroup
+function area:generateSquareOutline()
+    if not self:canEditOutline() then return nil end
+
+    local parent, wrapAction = self:getOutlineParent()
+    if not parent then return nil end
+
+    -- Snapshot before rebinding so undo restores the old outline.
+    local areaChange = history.getElementChange(self.object)
+    local outlineGroup = outlineConsumer.createMarkerGroup(self, parent, {
+        offsets = outlineConsumer.getSquareOffsets(),
+        height = outlineConsumer.NEW_OUTLINE_HEIGHT
+    })
+
+    if not outlineGroup then return nil end
+
+    self:bindOutline(outlineGroup)
+
+    local actions = { areaChange, history.getInsert({ outlineGroup }) }
+    if wrapAction then
+        table.insert(actions, 1, wrapAction)
+    end
+
+    history.addAction(history.getComposite(actions))
+
+    return outlineGroup
+end
+
+---Adds a marker, creating and binding an outline when needed.
+---@param position Vector4? World position
+---@return element? markerElement
+function area:addOutlinePoint(position)
+    if not position or not self:canEditOutline() then return nil end
+
+    local outlineGroup = outlineConsumer.getGroup(self)
+    local areaChange, wrapAction = nil, nil
+
+    if not outlineGroup then
+        local parent
+        parent, wrapAction = self:getOutlineParent()
+        if not parent then return nil end
+
+        areaChange = history.getElementChange(self.object)
+        outlineGroup = outlineConsumer.createMarkerGroup(self, parent)
+
+        if not outlineGroup then return nil end
+
+        self:bindOutline(outlineGroup)
+    end
+
+    local markerElement = outlineConsumer.addMarker(self, outlineGroup, position, outlineConsumer.NEW_OUTLINE_HEIGHT)
+    if not markerElement then return nil end
+
+    self:refreshOutline()
+
+    if areaChange then
+        -- The group is new, so its insert carries the marker with it.
+        local actions = { areaChange, history.getInsert({ outlineGroup }) }
+        if wrapAction then
+            table.insert(actions, 1, wrapAction)
+        end
+
+        history.addAction(history.getComposite(actions))
+    else
+        history.addAction(history.getInsert({ markerElement }))
+    end
+
+    return markerElement
+end
+
+---@return boolean
+function area:isPlacingOutlinePoints()
+    local sUI = self.object and self.object.sUI or nil
+
+    return sUI ~= nil
+        and type(sUI.isHierarchyPickActive) == "function"
+        and sUI.isHierarchyPickActive(self.object) == true
+end
+
+---Starts click-to-place outline markers.
+---@return boolean started
+function area:beginOutlinePointPlacement()
+    local sUI = self.object and self.object.sUI or nil
+
+    if not sUI or type(sUI.beginHierarchyPick) ~= "function" then
+        return false
+    end
+
+    return sUI.beginHierarchyPick(self.object, function(target)
+        -- Stop if this area's panel is no longer available.
+        if not self:canEditOutline() or self.object.selected ~= true then
+            return true
+        end
+
+        self:addOutlinePoint(target:getPosition())
+
+        -- Keep the pick armed until the button or Esc ends it.
+        return false
+    end, {
+        -- Accept only the editor's world-position pick.
+        canPick = function(target)
+            return type(target) == "table" and target.id == nil and type(target.getPosition) == "function"
+        end,
+        -- Ignore existing markers so later clicks still reach the world.
+        getWorldExcludeIds = function()
+            local ids = {}
+            local outlineGroup = outlineConsumer.getGroup(self)
+
+            for _, child in ipairs(outlineGroup and outlineGroup.childs or {}) do
+                if child.id then
+                    ids[child.id] = true
+                end
+            end
+
+            return ids
+        end,
+        restoreOwnerSelection = false
+    })
+end
+
+function area:cancelOutlinePointPlacement()
+    local sUI = self.object and self.object.sUI or nil
+
+    if sUI and type(sUI.cancelHierarchyPick) == "function" then
+        sUI.cancelHierarchyPick(self.object)
+    end
+end
+
 function area:getMarkersCenter()
     local markers = self.markers
     local center = Vector4.new(0, 0, 0, 0)
@@ -134,9 +291,59 @@ function area:draw()
     })
     if changed then
         self.outlinePath = paths[idx + 1]
-        element.bumpWireframeEpoch(self.object)
-        area.invalidateOutlineConsumers()
-        self:onOutlineChanged()
+        self:refreshOutline()
+    end
+
+    self:drawOutlineActions()
+end
+
+---Draws outline creation controls.
+---@protected
+function area:drawOutlineActions()
+    local editable = self:canEditOutline()
+    local placing = self:isPlacingOutlinePoints()
+
+    -- Cancel picks when the area is locked.
+    if placing and not editable then
+        self:cancelOutlinePointPlacement()
+        placing = false
+    end
+
+    ImGui.SameLine()
+    style.pushButtonNoBG(true)
+    ImGui.BeginDisabled(not editable or placing)
+    if ImGui.Button(IconGlyphs.VectorSquare .. "##generateOutlineSquare") then
+        self:generateSquareOutline()
+    end
+    ImGui.EndDisabled()
+    style.pushButtonNoBG(false)
+    style.tooltip(
+        string.format(
+            "Generate a new outline group of four markers, %.0fm to each side of this area, and use it.",
+            outlineConsumer.NEW_OUTLINE_RADIUS
+        ),
+        ImGuiHoveredFlags.AllowWhenDisabled
+    )
+
+    ImGui.SameLine()
+    ImGui.BeginDisabled(not editable)
+    local nextPlacing, placingChanged = style.toggleButton(IconGlyphs.MapMarkerPlusOutline .. "##addOutlinePoint", placing)
+    ImGui.EndDisabled()
+
+    if placingChanged then
+        if nextPlacing then
+            self:beginOutlinePointPlacement()
+        else
+            self:cancelOutlinePointPlacement()
+        end
+    end
+
+    if not editable then
+        style.tooltip("Unlock this area to add outline points.", ImGuiHoveredFlags.AllowWhenDisabled)
+    elseif placing then
+        style.tooltip("Click in the world to drop an outline marker there.\nPress Esc or this button again to stop.", ImGuiHoveredFlags.AllowWhenDisabled)
+    else
+        style.tooltip("Add outline markers by clicking in the world.\nCreates a new outline group when this area has none.", ImGuiHoveredFlags.AllowWhenDisabled)
     end
 end
 
@@ -179,8 +386,7 @@ function area:export(_, _, markersZOffset)
         if idx <= 255 then
             local diff = utils.subVector(ToVector4(marker), center)
             if outlineLocalRotation and outlineLocalRotation.TransformInverse then
-                -- Outline points are stored as local coords in the node. Convert world-space
-                -- marker offsets into the node's local frame when a rotation is provided.
+                -- Convert world marker offsets to the node's local frame.
                 diff = outlineLocalRotation:TransformInverse(diff)
             end
 

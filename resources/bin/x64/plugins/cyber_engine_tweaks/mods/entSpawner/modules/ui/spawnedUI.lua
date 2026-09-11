@@ -558,6 +558,8 @@ function spawnedUI.beginHierarchyPick(owner, onPick, opts)
         allowOwner = opts.allowOwner == true,
         restoreOwnerSelection = opts.restoreOwnerSelection ~= false,
         canPick = type(opts.canPick) == "function" and opts.canPick or nil,
+        -- Element ids the editor's world pick must shoot through, on top of the owner's own.
+        getWorldExcludeIds = type(opts.getWorldExcludeIds) == "function" and opts.getWorldExcludeIds or nil,
         onPick = onPick
     }
 

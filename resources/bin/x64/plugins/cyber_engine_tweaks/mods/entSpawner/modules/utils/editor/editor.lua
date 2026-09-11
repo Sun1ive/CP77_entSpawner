@@ -98,16 +98,25 @@ local function isSpawnedNameEditActive()
         and editor.spawnedUI.isNameEditActive()
 end
 
----Checks whether the editor viewport currently has keyboard focus.
----@return boolean focused True when the editor is active and the viewport is focused.
+---Returns whether the active editor viewport has keyboard focus.
+---@return boolean focused
 function viewportFocused()
     return editor.active and input.context.viewport.focused and not isSpawnedNameEditActive()
 end
 
----Checks whether the editor viewport is currently hovered by the mouse.
----@return boolean hovered True when the editor is active and the viewport is hovered.
+---Returns whether the active editor viewport is hovered.
+---@return boolean hovered
 function viewportHovered()
     return editor.active and input.context.viewport.hovered and not isSpawnedNameEditActive()
+end
+
+---Whether an element panel is waiting for a pick.
+---@return boolean armed
+local function isHierarchyPickArmed()
+    return editor.spawnedUI ~= nil
+        and type(editor.spawnedUI.isHierarchyPickActive) == "function"
+        and editor.spawnedUI.isHierarchyPickActive() == true
+        and not isSpawnedNameEditActive()
 end
 
 local function getActiveCameraSystem()
@@ -146,8 +155,7 @@ local function getFPPCameraLocalToWorld()
     return camera:GetLocalToWorld()
 end
 
----Returns whether the active camera is still attached to the player.
----Accounts for the built-in editor camera, XUtils free camera, and the FPP camera state.
+---Returns whether the active camera follows the player.
 ---@return boolean
 function editor.isCameraAttachedToPlayer()
     if editor.active then
@@ -254,21 +262,21 @@ local function getTransformForward(transform)
     return nil
 end
 
----Returns the current FPPCamera local-to-world transform.
----@return any? transform Camera transform, or nil when the player/camera is unavailable.
+---Returns the FPP camera transform.
+---@return any? transform
 function editor.getCameraLocalToWorld()
     return getFPPCameraLocalToWorld()
 end
 
----Returns the current active camera world position.
----@return Vector4? position Camera world position, or nil when unavailable.
+---Returns the active camera position.
+---@return Vector4? position
 function editor.getCameraPosition()
     return getTransformPosition(getActiveCameraWorldTransform())
         or getTransformPosition(getFPPCameraLocalToWorld())
 end
 
----Returns the current active camera world rotation.
----@return EulerAngles? rotation Camera world rotation, or nil when unavailable.
+---Returns the active camera rotation.
+---@return EulerAngles? rotation
 function editor.getCameraRotation()
     local rotation = getTransformRotation(getActiveCameraWorldTransform())
         or getTransformRotation(getFPPCameraLocalToWorld())
@@ -281,9 +289,8 @@ function editor.getCameraRotation()
     return forward and forward:ToRotation() or nil
 end
 
----Returns the rotation that makes a spawned asset face the camera, used by hover previews.
----This is the camera rotation flipped 180° in yaw with inverted pitch.
----@return EulerAngles? facing Camera-facing rotation, or nil when the camera is unavailable.
+---Returns a camera-facing rotation for hover previews.
+---@return EulerAngles? facing
 function editor.getCameraFacingRotation()
     local cameraRotation = editor.getCameraRotation()
     if not cameraRotation then
@@ -296,8 +303,8 @@ function editor.getCameraFacingRotation()
     return facing
 end
 
----Returns the current active camera world forward vector.
----@return Vector4? forward Camera forward vector, or nil when unavailable.
+---Returns the active camera's forward vector.
+---@return Vector4? forward
 function editor.getCameraForward()
     local cameraSystem = getActiveCameraSystem()
     if cameraSystem and cameraSystem.GetActiveCameraForward then
@@ -311,8 +318,8 @@ function editor.getCameraForward()
         or getTransformForward(getFPPCameraLocalToWorld())
 end
 
----Returns the current active camera FOV.
----@return number? fov Active camera FOV, or nil when unavailable.
+---Returns the active camera FOV.
+---@return number? fov
 function editor.getCameraFOV()
     local cameraSystem = getActiveCameraSystem()
     if cameraSystem and cameraSystem.GetActiveCameraFOV then
@@ -327,17 +334,13 @@ function editor.getCameraFOV()
     return camera and camera:GetFOV() or nil
 end
 
----Returns whether a teleport would move a camera this mod controls rather than the player.
----Only the built-in editor camera can be placed independently of the player: the other detached
----camera sources (XUtils, Freefly) ride the player entity, so for those moving the player is what
----moves the view.
+---Returns whether teleporting should move the editor camera instead of the player.
 ---@return boolean
 function editor.isCameraTeleportTarget()
     return editor.camera ~= nil and editor.camera.active == true
 end
 
----Teleports to a world position, moving whatever the view is currently attached to.
----With the editor camera detached from the player that is the camera; otherwise it is the player.
+---Teleports the detached editor camera or the player.
 ---@param position Vector4 Target world position.
 ---@param rotationLike any? Optional target rotation; the current one is kept when omitted.
 ---@param opts table? Forwarded to `gameUtils.teleportPlayer` on the player path.
@@ -362,8 +365,7 @@ local function clearGroupRotationDragState()
     end
 end
 
----Cancels the current transform operation and restores the original transform snapshot.
----Note: function name keeps the historical typo for compatibility.
+---Cancels the transform and restores its original values.
 function editor.cancleEditingTransform()
     editor.grab = false
     editor.rotate = false
@@ -404,6 +406,19 @@ local function tryResolveHierarchyPickFromWorld()
     local request = editor.spawnedUI.hierarchyPickRequest
     if request and request.ownerId then
         excludeIds = { [request.ownerId] = true }
+    end
+
+    -- Prevent repeated picks from hitting newly spawned geometry.
+    if request and type(request.getWorldExcludeIds) == "function" then
+        local ok, extra = pcall(request.getWorldExcludeIds)
+
+        if ok and type(extra) == "table" then
+            excludeIds = excludeIds or {}
+
+            for id in pairs(extra) do
+                excludeIds[id] = true
+            end
+        end
     end
 
     local ray = editor.getScreenToWorldRay()
@@ -454,7 +469,7 @@ function editor.confirmEditingTransform()
     input.trackNumeric(false)
 end
 
----Initializes editor dependencies and registers mouse/keyboard bindings.
+---Initializes editor dependencies and input bindings.
 ---@param spawner spawner Main spawner runtime instance used to resolve UI modules.
 function editor.init(spawner)
     editor.baseUI = spawner.baseUI
@@ -483,6 +498,19 @@ function editor.init(spawner)
         end
         editor.cancleEditingTransform()
     end, viewportHovered)
+
+    -- Allow panel-armed picks while editor mode is off.
+    input.registerMouseAction(ImGuiMouseButton.Left, function()
+        tryResolveHierarchyPickFromWorld()
+    end, function()
+        return not editor.active and isHierarchyPickArmed() and input.context.viewport.hovered
+    end)
+
+    input.registerImGuiHotkey({ ImGuiKey.Escape }, function()
+        editor.spawnedUI.cancelHierarchyPick()
+    end, function()
+        return not editor.active and isHierarchyPickArmed()
+    end)
     input.registerImGuiHotkey({ ImGuiKey.Enter }, function ()
         editor.confirmEditingTransform()
     end,
@@ -582,8 +610,8 @@ function editor.init(spawner)
     end)
 end
 
----Gets the current editable selection.
----@return positionable? selected Single selected positionable, or multi-select proxy group, or nil.
+---Returns the selected positionable or multi-select proxy.
+---@return positionable? selected
 function editor.getSelected()
     editor.spawnedUI.ensureCache()
 
@@ -631,8 +659,8 @@ function editor.centerCamera()
     editor.camera.transition(editor.camera.cameraTransform.position, pos, editor.camera.cameraTransform.rotation, editor.camera.cameraTransform.rotation, distance, 0.5)
 end
 
----Removes outline highlight from spawned entries.
----@param onlySelected boolean? When true, clear highlight only for selected paths; otherwise for all paths.
+---Removes highlights from selected or all spawned entries.
+---@param onlySelected boolean?
 function editor.removeHighlight(onlySelected)
     local paths = onlySelected and editor.spawnedUI.selectedPaths or editor.spawnedUI.paths
 
@@ -656,10 +684,10 @@ function editor.addHighlightToSelected()
     end
 end
 
----Builds a normalized world-space ray from a screen position.
----@param x number? Screen-space X coordinate in pixels. Defaults to current mouse X.
----@param y number? Screen-space Y coordinate in pixels. Defaults to current mouse Y.
----@return Vector4 ray Normalized world-space ray direction.
+---Builds a normalized world ray from screen coordinates.
+---@param x number? Defaults to the mouse X position
+---@param y number? Defaults to the mouse Y position
+---@return Vector4 ray
 function editor.getScreenToWorldRay(x, y)
     if not x or not y then
         x, y = ImGui.GetMousePos()
@@ -670,9 +698,7 @@ function editor.getScreenToWorldRay(x, y)
     return ray:Normalize()
 end
 
----Raycasts the scene from the camera through the current cursor position.
----Shorthand for the `getScreenToWorldRay` + camera-origin + `getRaySceneIntersection`
----trio used by every "spawn / drop under the cursor" path.
+---Raycasts from the camera through the cursor.
 ---@param excludeIds table<number, boolean>? Optional lookup table of element IDs to ignore.
 ---@param usePhysical boolean? When true (default), physical raycast hits can override spawnable hits.
 ---@return { hit: boolean, isNode: boolean, allHits: table[], result: table? }? hitData Nil when there is no player.
@@ -687,12 +713,12 @@ function editor.getCursorSceneHit(excludeIds, usePhysical)
     return editor.getRaySceneIntersection(editor.getScreenToWorldRay(), origin, excludeIds, usePhysical ~= false)
 end
 
----Finds the nearest intersection between a ray and spawned elements or physical world geometry.
+---Finds the nearest spawned or physical ray intersection.
 ---@param ray Vector4 Normalized ray direction.
 ---@param origin Vector4 Ray origin in world space.
 ---@param excludeIds table<number, boolean>? Optional lookup table of element IDs to ignore.
 ---@param usePhysical boolean When true, physical raycast hits can override spawnable hits if closer.
----@return { hit: boolean, isNode: boolean, allHits: table[], result: table? } hitData Result payload including all spawnable hits and chosen hit.
+---@return { hit: boolean, isNode: boolean, allHits: table[], result: table? } hitData
 function editor.getRaySceneIntersection(ray, origin, excludeIds, usePhysical)
     local hits = {}
 
@@ -707,10 +733,14 @@ function editor.getRaySceneIntersection(ray, origin, excludeIds, usePhysical)
         end
     end
 
-    local raycast = editor.interface:RaycastWithASingleGroup(origin, utils.addVector(origin, utils.multVector(ray, 9999)), "PlayerBlocker")
+    -- The locomotion observer initializes this after the player moves.
+    local raycast = editor.interface
+        and editor.interface:RaycastWithASingleGroup(origin, utils.addVector(origin, utils.multVector(ray, 9999)), "PlayerBlocker")
+        or nil
+    local physicalHit = raycast ~= nil and raycast:IsValid()
 
     if #hits == 0 then
-        if raycast:IsValid() then
+        if physicalHit then
             return {
                 result = {
                     position = Vector4.Vector3To4(raycast.position),
@@ -729,14 +759,14 @@ function editor.getRaySceneIntersection(ray, origin, excludeIds, usePhysical)
         return a.distance < b.distance
     end)
 
-    -- If there is a hit inside the primary hit, use that one instead (To prefer things inside the bbox of the primary hit, can often be the case)
+    -- Prefer nested hits inside the primary bounding box.
     local bestHitIdx = 1
     while bestHitIdx + 1 <= #hits and intersection.BBoxInsideBBox(hits[bestHitIdx].objectOrigin, hits[bestHitIdx].objectRotation, hits[bestHitIdx].bBox, hits[bestHitIdx + 1].objectOrigin, hits[bestHitIdx + 1].objectRotation, intersection.scaleBBox(hits[bestHitIdx + 1].bBox, Vector4.new(0.85, 0.85, 0.85))) do
         bestHitIdx = bestHitIdx + 1
     end
     bestHitIdx = math.min(bestHitIdx, #hits)
 
-    if raycast:IsValid() and usePhysical then
+    if physicalHit and usePhysical then
         local distance = Vector4.Vector3To4(raycast.position):Distance(origin)
 
         if distance + 0.1 < hits[bestHitIdx].distance or distance < 0.1 then
@@ -793,11 +823,7 @@ function editor.updateArrowColor()
     visualizer.highlightArrow(selected.spawnable:getEntity(), editor.currentAxis)
 end
 
----Keeps the positioning-arrow gizmo of every selected element sized for the current camera distance.
----Editor mode only, matching `spawnable:getArrowDistanceFactor`; `editor.resetArrowScale` puts the
----arrows back to base size on exit. Runs each frame; `visualizer.setArrowScale` only refreshes the
----mesh when the (quantized) target size actually changed, so a stationary camera performs no work
----and continuous motion re-scales only when crossing a size bucket.
+---Scales selected gizmos for camera distance while editor mode is active.
 function editor.updateArrowScale()
     if not editor.active then return end
     if not editor.spawnedUI or not GetPlayer() then return end
@@ -813,10 +839,7 @@ function editor.updateArrowScale()
     end
 end
 
----Restores every visible positioning-arrow gizmo to its base, distance-independent size.
----Distance scaling is editor-mode only, but leaving editor mode does not by itself rewrite the
----`visualScale` already pushed onto the components, so any arrow grown for a far-away editor camera
----would stay that big in-world. This is what actually applies the un-scaled size on the way out.
+---Restores visible gizmos to their base scale.
 function editor.resetArrowScale()
     if not editor.spawnedUI then return end
 
@@ -824,9 +847,7 @@ function editor.resetArrowScale()
         editor.spawnedUI.ensureCache()
     end
 
-    -- Passed explicitly rather than letting getArrowDistanceFactor resolve it, so the reset does not
-    -- depend on `editor.active` having already been cleared by the caller. Same value that function
-    -- returns once distance scaling is out of the picture: the user multiplier alone.
+    -- Use only the user multiplier, independent of `editor.active`.
     local baseFactor = settings.arrowSizeMultiplier or 1.0
 
     for _, path in pairs(editor.spawnedUI.paths) do
@@ -986,7 +1007,7 @@ function editor.checkArrow()
     visualizer.highlightArrow(selected:getEntity(), editor.hoveredArrow)
 end
 
----Computes cursor movement relative to a world position in camera-relative space.
+---Returns camera-relative cursor movement from a world position.
 ---@param position Vector4 World-space pivot point used for the reference plane.
 ---@return Vector4 relativeDelta Camera-relative delta from pivot to cursor-plane hit.
 function editor.getScreenRelativeToPoint(position)
@@ -1008,8 +1029,7 @@ end
 function editor.updateDrag()
     local dragging = ImGui.IsMouseDragging(0, style.draggingThreshold) and not (editor.grab or editor.rotate or editor.scale)
     if dragging then
-        -- `hoveredArrow` keeps the value it had when the cursor last left the viewport, so a drag
-        -- owned by a UI widget must not be allowed to latch onto it, see editor.handleBoxSelect.
+        -- Do not let UI drags reuse a stale hovered arrow.
         if editor.hoveredArrow ~= "none" and not input.isUIInputActive() then
             editor.currentAxis = editor.hoveredArrow
         end
@@ -1133,7 +1153,7 @@ function editor.updateDrag()
     end
 end
 
----Returns a point in front of the camera, adjusted to editor viewport center when active.
+---Returns a point in front of the active viewport camera.
 ---@param distance number Forward distance in meters.
 ---@return Vector4 worldPosition Target point in world space.
 ---@return Vector4 relativeForward Unadjusted camera-space forward vector returned by `camera.screenToWorld`.
@@ -1193,7 +1213,7 @@ function editor.drawDepthSelect()
     end
 end
 
----Calculates all eight world-space corners of a spawnable bounding box.
+---Returns the world-space corners of a spawnable bounding box.
 ---@param entry spawnable Spawnable entry whose local bounding box is transformed to world space.
 ---@return Vector4[] corners World-space corner points.
 local function calculateSpawnableCorners(entry)
@@ -1217,9 +1237,9 @@ local function calculateSpawnableCorners(entry)
     return corners
 end
 
----Checks whether a numeric value is finite and not NaN.
----@param value number? Value to validate.
----@return boolean isFiniteValue True when value is a finite number.
+---Returns whether a value is finite.
+---@param value number?
+---@return boolean isFiniteValue
 local function isFinite(value)
     return value ~= nil and value == value and value > -math.huge and value < math.huge
 end
@@ -1237,7 +1257,7 @@ local function refreshWireframeCaches()
     editor.wireframeMultiLeafCache = nil
 end
 
----Returns and caches leaf spawnable elements for a group.
+---Returns cached leaf spawnables for a group.
 ---@param group positionableGroup Group whose leaf nodes should be collected.
 ---@return spawnableElement[] leafs Cached list of leaf spawnable elements.
 local function getGroupLeafsCached(group)
@@ -1256,26 +1276,26 @@ local function getGroupLeafsCached(group)
     return leafs
 end
 
----Appends source leaf elements into a target array.
----@param target spawnableElement[] Destination array to mutate.
----@param source spawnableElement[] Source array to append.
+---Appends source spawnables to a target array.
+---@param target spawnableElement[]
+---@param source spawnableElement[]
 local function appendLeafs(target, source)
     for _, leaf in ipairs(source) do
         table.insert(target, leaf)
     end
 end
 
----Compares two numbers with epsilon tolerance.
----@param a number? First value.
----@param b number? Second value.
----@return boolean equal True when both values are equal within epsilon.
+---Compares two numbers within epsilon.
+---@param a number?
+---@param b number?
+---@return boolean equal
 local function almostEqual(a, b)
     if a == b then return true end
     if not a or not b then return false end
     return math.abs(a - b) <= 0.0001
 end
 
----Builds group-local min/max bounds from world-space leaf bounding boxes.
+---Builds group-local bounds from leaf bounding boxes.
 ---@param leafs spawnableElement[] Leaf spawnable elements used to compute aggregate bounds.
 ---@param origin Vector4 Group origin in world space.
 ---@param groupQuat Quaternion Group orientation in world space.
@@ -1325,7 +1345,7 @@ local function getLocalBoundsFromLeafs(leafs, origin, groupQuat)
     return minLocal, maxLocal, groupQuat
 end
 
----Collects group targets that should render oriented bounds overlays.
+---Collects eligible group overlay targets.
 ---@return table[] targets Overlay target records with `cacheKey`, `origin`, `quat`, and `leafs`.
 local function getOverlayTargets()
     refreshWireframeCaches()
@@ -1378,7 +1398,7 @@ local function getOverlayTargets()
     local targets = {}
     local seen = {}
 
----Adds a group overlay target once, skipping root/ineligible groups.
+---Adds an eligible non-root overlay target once.
 ---@param group positionableGroup? Candidate group to include.
     local function addGroupTarget(group)
         if not group or group.parent == nil or seen[group.id] then
@@ -1409,7 +1429,7 @@ local function getOverlayTargets()
     return targets
 end
 
----Returns cached group-local bounds for an overlay target.
+---Returns cached local bounds for an overlay target.
 ---@param target table Overlay target record containing `cacheKey`, `origin`, `quat`, and `leafs`.
 ---@return Vector4? minLocal Cached or computed local minimum corner.
 ---@return Vector4? maxLocal Cached or computed local maximum corner.
@@ -1460,7 +1480,7 @@ local function getCachedLocalBounds(target)
     return minLocal, maxLocal, groupQuat
 end
 
----Resolves wireframe theme colors for group overlays.
+---Returns group overlay colors for the current theme.
 ---@return number frontColor Color for visible/front edges.
 ---@return number backColor Color for occluded/back edges.
 ---@return number labelColor Color for distance/label text.
@@ -1475,7 +1495,7 @@ local function getGroupWireframeThemeColors()
     return 0xFF992D00, 0x55992D00, 0xFFDCD8D1
 end
 
----Draws an oriented group bounds wireframe overlay.
+---Draws an oriented group bounds wireframe.
 ---@param target table Overlay target with transform and leaf metadata.
 ---@param screen table Screen projection helper returned by `projectedWireframe.beginOverlay`.
 ---@param drawList table ImGui draw list for overlay rendering.
@@ -1526,7 +1546,7 @@ local function drawHoveredGroupBounds()
     projectedWireframe.endOverlay()
 end
 
----Collects spawnables that expose a streaming range visualization.
+---Collects spawnables with streaming-range visuals.
 ---@return table[] targets Array of `{ range, refPoint }` records.
 local function getStreamingRangeTargets()
     editor.spawnedUI.ensureCache()
@@ -1557,7 +1577,7 @@ local function getStreamingRangeTargets()
     return targets
 end
 
----Checks whether a point lies inside an axis-aligned streaming range box.
+---Tests a point against an axis-aligned streaming box.
 ---@param point Vector4 Point to test.
 ---@param center Vector4 Center of the streaming box.
 ---@param range number Half-extent applied on all axes.
@@ -1608,8 +1628,7 @@ local function drawSpawnableStreamingRanges()
     projectedWireframe.endOverlay()
 end
 
----Draws per-spawnable viewport overlays for spawnables implementing `drawViewportOverlay`.
----A single shared overlay window is opened for all of them.
+---Draws spawnable viewport overlays in one shared window.
 local function drawSpawnableViewportOverlays()
     if not editor.camera or not editor.spawnedUI or not GetPlayer() then return end
 
@@ -1642,9 +1661,7 @@ local function drawSpawnableViewportOverlays()
     projectedWireframe.endOverlay()
 end
 
----Finds the selected lift device eligible for door-helper rendering.
----Only returns spawned `entity/device` entries with class `LiftControllerPS`
----and the `showDoorsHelper` toggle enabled.
+---Returns the selected lift when door helpers are enabled.
 ---@return { lift: spawnable }?
 local function resolveSelectedLiftDoorHelperContext()
     if not editor.spawnedUI then
@@ -1685,7 +1702,7 @@ local function resolveSelectedLiftDoorHelperContext()
     }
 end
 
----Resolves marker/badge colors for a door number using current wireframe style.
+---Returns door marker colors for the current theme.
 ---@param index integer
 ---@return integer markerColor
 ---@return integer labelColor
@@ -1711,8 +1728,7 @@ local function getElevatorDoorMarkerThemeColors(index)
     return colorByDoor[index] or style.successColor, 0xFFDCD8D1
 end
 
----Draws numbered elevator door helper markers for the currently selected lift: resolves the lift and
----its family layout (including any family-specific side rotation), then projects color-coded badges.
+---Draws numbered door markers for the selected lift.
 local function drawElevatorDoorHelpers()
     local context = resolveSelectedLiftDoorHelperContext()
     if not context then
@@ -1752,9 +1768,7 @@ local function drawElevatorDoorHelpers()
     projectedWireframe.endOverlay()
 end
 
----Finds the selected device eligible for sound system helper rendering.
----Accepts either end of the chain: selecting the system shows the whole chain, selecting one
----speaker shows just its own range.
+---Returns the selected sound system or speaker helper target.
 ---@return { spawnable: spawnable, isSystem: boolean }?
 local function resolveSelectedSoundSystemContext()
     if not editor.spawnedUI then
@@ -1788,8 +1802,7 @@ local function resolveSelectedSoundSystemContext()
             or nil
     end
 
-    -- A selected speaker has nothing to draw but its own range, so the range toggle is the whole
-    -- gate here rather than a second switch in front of it.
+    -- A selected speaker only draws its range.
     if className == soundSystemData.SPEAKER_CONTROLLER_CLASS then
         return spawnable.showSpeakerRangeSphere == true
             and { spawnable = spawnable, isSystem = false }
@@ -1810,12 +1823,7 @@ local function getSpawnablePosition(spawnable)
     return Vector4.new(position.x, position.y, position.z, 0)
 end
 
----Draws the sound system chain: a link line and numbered badge per connected speaker, a link line
----per master driving the system, plus the audible range of each speaker whose range toggle is on --
----the chain is the system's to draw, the radius stays the speaker's. The two link colors differ
----because the connections run opposite ways -- the system owns its speaker connections, while a
----master owns the one that names the system. A speaker whose NodeRef resolves to nothing simply has
----no line, which is the point: a typo shows up as a missing link rather than as silence in game.
+---Draws sound-system links, speaker badges, and enabled range previews.
 local function drawSoundSystemHelpers()
     local context = resolveSelectedSoundSystemContext()
     if not context then
@@ -1842,9 +1850,7 @@ local function drawSoundSystemHelpers()
             return
         end
 
-        -- The ring and the world sphere are one visualization behind one toggle, so a system that is
-        -- drawing its chain does not ring speakers whose range is switched off. Reading the range
-        -- means reading the persistent state, so it only happens when the circle is going to be drawn.
+        -- Read and draw the range only when its preview is enabled.
         if spawnable.showSpeakerRangeSphere == true then
             local setup = context.spawnable.getSpeakerSetup
                 and select(1, context.spawnable:getSpeakerSetup(spawnable))
@@ -1944,11 +1950,7 @@ function editor.handleBoxSelect()
 
     local x, y = ImGui.GetMousePos()
     local ctrlDown = ImGui.IsKeyDown(ImGuiKey.LeftCtrl) or ImGui.IsKeyDown(ImGuiKey.RightCtrl)
-    -- `isUIInputActive`: a drag that started on a widget keeps ImGui's active id for its whole
-    -- duration, including the part where the cursor is pulled out over the viewport. Without this
-    -- a Ctrl + drag on any value field in the editor panel would start a box select here, and the
-    -- unselectAll below would drop the very element being edited. It discounts the wheel probe
-    -- window's move id, so a genuine Ctrl + drag on the bare viewport still gets through.
+    -- Ignore widget drags that continue over the viewport.
     if ctrlDown and ImGui.IsMouseDragging(0, style.draggingThreshold) and not editor.boxSelectActive and input.context.viewport.hovered and not input.isUIInputActive() then
         editor.boxSelectActive = true
         editor.boxSelectStart = { x = x, y = y }
@@ -1992,9 +1994,7 @@ function editor.handleBoxSelect()
     end
 end
 
----Whether a viewport interaction is already running, and so has to keep being updated even while
----the cursor sits over the editor panel - a gizmo drag pulled across the panel would otherwise
----freeze mid move and never record its change.
+---Returns whether a viewport interaction still needs updates over the UI.
 ---@return boolean active
 function editor.hasActiveViewportInteraction()
     return editor.currentAxis ~= "none"
