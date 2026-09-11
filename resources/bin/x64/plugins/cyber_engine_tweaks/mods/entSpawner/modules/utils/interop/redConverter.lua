@@ -462,6 +462,77 @@ local function convertSimple(propValue, propClass, prop)
     return propData
 end
 
+-- CET reads an enum off a live object by zero-extending its raw storage into a `uint64`, so a member
+-- with a negative value (`EDoorStatus.LOCKED = -1`) never matches its own name and `.value` comes
+-- back as "". `EnumInt` still exposes that raw value, and the width it was widened from is one of
+-- these, so the name is recoverable by wrapping each negative member and matching.
+local ENUM_STORAGE_WIDTHS = { 256, 65536, 4294967296 }
+
+---@type table<string, table<number, string>>
+local wrappedEnumNames = {}
+
+---Raw-value -> name map for the negative members of an enum, built once per type.
+---@param enumName string
+---@return table<number, string>
+local function getWrappedEnumNames(enumName)
+    local cached = wrappedEnumNames[enumName]
+    if cached then
+        return cached
+    end
+
+    local names = {}
+    local okMembers, members = pcall(utils.enumTable, enumName)
+
+    for _, name in ipairs(okMembers and members or {}) do
+        local ok, signed = pcall(function ()
+            return parseUnsignedLiteralNumber(tostring(EnumValueFromString(enumName, name)))
+        end)
+
+        if ok and signed and signed < 0 then
+            for _, width in ipairs(ENUM_STORAGE_WIDTHS) do
+                local wrapped = signed + width
+                if wrapped > 0 then
+                    names[wrapped] = name
+                end
+            end
+        end
+    end
+
+    wrappedEnumNames[enumName] = names
+    return names
+end
+
+---@param propValue Enum
+---@param propType string
+---@return string?
+local function convertEnum(propValue, propType)
+    if propValue == nil then
+        return nil
+    end
+
+    local okName, name = pcall(function ()
+        return propValue.value
+    end)
+
+    if not okName then
+        return nil
+    end
+
+    if name ~= nil and name ~= "" then
+        return name
+    end
+
+    local okRaw, raw = pcall(function ()
+        return parseUnsignedLiteralNumber(tostring(EnumInt(propValue)))
+    end)
+
+    if not okRaw or not raw then
+        return name
+    end
+
+    return getWrappedEnumNames(propType)[raw] or name
+end
+
 local function convertBitField(propValue, propType)
     if propValue == nil then
         return nil
@@ -692,7 +763,7 @@ function red.convertAny(metaType, propType, value, prop, data, ctx)
     elseif metaType == ERTTIType.Simple then -- LocalizationString, Buffers, CRUID
         propData = convertSimple(value, propType, prop)
     elseif metaType == ERTTIType.Enum then
-        propData = value.value
+        propData = convertEnum(value, propType)
     elseif metaType == ERTTIType.BitField then
         propData = convertBitField(value, propType)
     elseif metaType == ERTTIType.Array or metaType == ERTTIType.StaticArray or metaType == ERTTIType.NativeArray or metaType == ERTTIType.FixedArray then
@@ -864,6 +935,11 @@ end
 ---accepted too -- but only one the live enum actually carries: `Enum.new` silently falls back to
 ---zero for an ordinal it does not know, and quietly writing the wrong member is worse than leaving
 ---the property on whatever the entity shipped with.
+---
+---Always constructed by name, never by ordinal: `Enum.new`'s numeric overload takes a `uint32`, so
+---a negative member (`EDoorStatus.LOCKED = -1`) arrives as 4294967295, matches nothing and falls
+---back to zero. The name overload assigns the member's signed value directly and truncates back to
+---the right bit pattern on write.
 local function importEnum(value, propType, enumName)
     local propData = nil
     local text = tostring(value)
@@ -871,7 +947,7 @@ local function importEnum(value, propType, enumName)
 
     for _, enum in pairs(constants) do
         if enum:GetName().value == text then
-            propData = Enum.new(enumName, tonumber(enum:GetValue()))
+            propData = Enum.new(enumName, text)
             break
         end
     end
@@ -880,7 +956,7 @@ local function importEnum(value, propType, enumName)
     if ordinal then
         for _, enum in pairs(constants) do
             if tonumber(enum:GetValue()) == ordinal then
-                propData = Enum.new(enumName, ordinal)
+                propData = Enum.new(enumName, enum:GetName().value)
                 break
             end
         end
