@@ -137,6 +137,7 @@ function quickTransformAnimationSetupUI.install(device)
         local changed, settled = false, false
         local current = readPath(owner, field.path)
         local width = field.width or 160
+        local hintDrawn = false
 
         style.mutedText(field.label)
         ImGui.SameLine()
@@ -321,14 +322,19 @@ function quickTransformAnimationSetupUI.install(device)
         elseif field.kind == "enum" then
             local values = data.ENUMS[field.enum] or {}
             local index = math.max(0, utils.indexValue(values, tostring(current or "")) - 1)
-            local newIndex, didChange = style.trackedCombo(self.object, "##field", index, values, width)
+            -- The combo emits its own tooltip, so the hint goes through it instead of the trailing
+            -- style.tooltip below, which would stack a second tooltip window on the same item.
+            local newIndex, didChange = style.trackedCombo(self.object, "##field", index, values, width, {
+                tooltip = field.hint
+            })
             if didChange then
                 writePath(owner, field.path, values[newIndex + 1])
                 changed, settled = true, true
             end
+            hintDrawn = true
         end
 
-        if field.hint then
+        if field.hint and not hintDrawn then
             style.tooltip(field.hint)
         end
 
@@ -436,9 +442,11 @@ function quickTransformAnimationSetupUI.install(device)
 
         local index = data.easingComboIndex(easing.easingType, easing.transitionType)
         local newIndex, didChange = style.trackedCombo(
-            self.object, "##easing", index, data.EASING_LABELS, 180, { popupMaxHeight = 300 }
+            self.object, "##easing", index, data.EASING_LABELS, 180, {
+                popupMaxHeight = 300,
+                tooltip = "Curve shape, then which end of the motion it is applied to. Linear / InOut is the flat mechanical default."
+            }
         )
-        style.tooltip("Curve shape, then which end of the motion it is applied to. Linear / InOut is the flat mechanical default.")
 
         if didChange then
             local easingType, transitionType = data.easingComboValues(newIndex)
@@ -644,22 +652,24 @@ function quickTransformAnimationSetupUI.install(device)
         ImGui.SetCursorPosX(labelWidth)
         local typeValues = data.ENUMS.EAnimationType
         local typeIndex = math.max(0, utils.indexValue(typeValues, animationType) - 1)
-        local newTypeIndex, typeChanged = style.trackedCombo(self.object, "##animationType", typeIndex, typeValues, 180)
+        local newTypeIndex, typeChanged = style.trackedCombo(self.object, "##animationType", typeIndex, typeValues, 180, {
+            tooltip = "REGULAR plays a baked animgraph clip and ignores everything below. TRANSFORM plays the clips on this component."
+        })
         if typeChanged then
             writeEntityValue(self, data.ANIMATION_TYPE_PATH, typeValues[newTypeIndex + 1])
         end
-        style.tooltip("REGULAR plays a baked animgraph clip and ignores everything below. TRANSFORM plays the clips on this component.")
 
         style.mutedText("Opening type")
         ImGui.SameLine()
         ImGui.SetCursorPosX(labelWidth)
         local openingValues = data.ENUMS.EDoorOpeningType
         local openingIndex = math.max(0, utils.indexValue(openingValues, openingType) - 1)
-        local newOpeningIndex, openingChanged = style.trackedCombo(self.object, "##openingType", openingIndex, openingValues, 180)
+        local newOpeningIndex, openingChanged = style.trackedCombo(self.object, "##openingType", openingIndex, openingValues, 180, {
+            tooltip = "Selects which of the four reserved clip names the door plays."
+        })
         if openingChanged then
             writeEntityValue(self, data.OPENING_TYPE_PATH, openingValues[newOpeningIndex + 1])
         end
-        style.tooltip("Selects which of the four reserved clip names the door plays.")
 
         local activeClip = data.clipForDoor(openingType, animationType, false)
         if activeClip then

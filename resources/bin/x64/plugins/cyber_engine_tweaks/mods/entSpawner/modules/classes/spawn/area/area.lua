@@ -129,14 +129,15 @@ function area:draw()
     style.mutedText("Outline Path")
     ImGui.SameLine()
     ImGui.SetCursorPosX(self.maxPropertyWidth)
-    local idx, changed = style.trackedCombo(self.object, "##outlinePath", index - 1, paths, 225)
+    local idx, changed = style.trackedCombo(self.object, "##outlinePath", index - 1, paths, 225, {
+        tooltip = "Path to the group containing the outline markers.\nMust be contained within the same root group as this area."
+    })
     if changed then
         self.outlinePath = paths[idx + 1]
         element.bumpWireframeEpoch(self.object)
         area.invalidateOutlineConsumers()
         self:onOutlineChanged()
     end
-    style.tooltip("Path to the group containing the outline markers.\nMust be contained within the same root group as this area.")
 end
 
 function area:getProperties()

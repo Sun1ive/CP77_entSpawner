@@ -503,9 +503,9 @@ function quickSoundSystemSetupUI.install(device)
                 "##soundSystemSpeakerAppearance",
                 appIndex,
                 definition.appearances,
-                200
+                200,
+                { tooltip = "Mesh variant of this speaker." }
             )
-            style.tooltip("Mesh variant of this speaker.")
             if appChanged then
                 speakerSpawnable.app = definition.appearances[newApp + 1] or speakerSpawnable.app
                 speakerSpawnable:respawn()

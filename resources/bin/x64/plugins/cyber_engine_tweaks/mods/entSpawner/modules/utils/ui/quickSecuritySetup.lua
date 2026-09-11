@@ -447,9 +447,9 @@ function quickSecuritySetupUI.install(device)
             "##securityOutlinePath",
             index - 1,
             paths,
-            style.getRowFieldWidth({}, 200)
+            style.getRowFieldWidth({}, 200),
+            { tooltip = "Group of outline markers describing this area's volume.\nMust sit under the same root group as the device. The trigger volume follows the markers." }
         )
-        style.tooltip("Group of outline markers describing this area's volume.\nMust sit under the same root group as the device. The trigger volume follows the markers.")
 
         if outlineChanged then
             local picked = paths[newIndex + 1] or "None"

@@ -1768,6 +1768,8 @@ local function drawComboWithDisabledOptions(text, selected, options, comboWidth,
 end
 
 ---Draw a combo box and optionally record history when selection changes.
+---Emits its own tooltip, so pass helper text as `opts.tooltip` instead of calling `style.tooltip`
+---afterwards; two tooltips on one item overlap and clip each other.
 ---@class TrackedComboOpts
 ---@field tooltip string? Optional helper text appended after the current value.
 ---@field tooltipFn fun(currentValue: string)? Custom tooltip/copy handler for the combo item. When set, `tooltip` and `currentValueTooltip` are skipped.
