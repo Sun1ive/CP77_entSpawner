@@ -8,6 +8,7 @@ local style = require("modules/ui/style")
 ---Class for entity records spawned via worldPopulationSpawnerNode
 ---@class record : entity
 ---@field public spawnOnStart boolean
+---@field public isVehicle boolean
 ---@field public alwaysSpawned boolean
 local record = setmetatable({}, { __index = entity })
 
@@ -45,6 +46,7 @@ function record:new()
     o.assetPreviewType = "none"
 
     o.spawnOnStart = true
+    o.isVehicle = false
     o.alwaysSpawned = false
 
     setmetatable(o, { __index = self })
@@ -116,6 +118,8 @@ function record:save()
     local data = entity.save(self)
     data.spawnOnStart = self.spawnOnStart
     if data.spawnOnStart == nil then data.spawnOnStart = true end
+    data.isVehicle = self.isVehicle
+    if data.isVehicle == nil then data.isVehicle = false end
     data.alwaysSpawned = self.alwaysSpawned
 
     return data
@@ -186,6 +190,10 @@ function record:draw()
     ImGui.SameLine()
     self.spawnOnStart, _ = style.trackedCheckbox(self.object, "##spawnOnStart", self.spawnOnStart)
 
+    style.mutedText("Is vehicle")
+    ImGui.SameLine()
+    self.isVehicle, _ = style.trackedCheckbox(self.object, "##isVehicle", self.isVehicle)
+
     style.mutedText("Always spawned")
     ImGui.SameLine()
     self.alwaysSpawned, _ = style.trackedCheckbox(self.object, "##alwaysSpawned", self.alwaysSpawned)
@@ -205,6 +213,7 @@ function record:export()
             ["$value"] = self.spawnData
         },
         spawnOnStart = self.spawnOnStart and 1 or 0,
+        isVehicle = self.isVehicle and 1 or 0,
         alwaysSpawned = self.alwaysSpawned and "true_" or "false_"
     }
 
