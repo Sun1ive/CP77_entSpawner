@@ -19,6 +19,7 @@ local sessionSnapshot = require("modules/utils/pipeline/sessionSnapshot")
 local sessionRestorePopup = require("modules/utils/ui/sessionRestorePopup")
 local lcHelper = require("modules/utils/ui/lightChannelHelper")
 local soundSystemData = require("modules/utils/data/soundSystem")
+local securitySystemData = require("modules/utils/data/securitySystem")
 
 local wu
 
@@ -2176,6 +2177,9 @@ local ELEVATOR_FLOOR_CONTROLLER_CLASS = "ElevatorFloorTerminalControllerPS"
 local DOOR_CONTROLLER_CLASS = "DoorControllerPS"
 local SOUND_SYSTEM_CONTROLLER_CLASS = soundSystemData.SOUND_SYSTEM_CONTROLLER_CLASS
 local SPEAKER_CONTROLLER_CLASS = soundSystemData.SPEAKER_CONTROLLER_CLASS
+local SECURITY_SYSTEM_CONTROLLER_CLASS = securitySystemData.SECURITY_SYSTEM_CONTROLLER_CLASS
+local SECURITY_AREA_CONTROLLER_CLASS = securitySystemData.SECURITY_AREA_CONTROLLER_CLASS
+local COMMUNITY_PROXY_CLASS = securitySystemData.COMMUNITY_PROXY_CLASS
 local CONNECTION_COUNT_ICONS = {
     [0] = IconGlyphs.Numeric0CircleOutline,
     [1] = IconGlyphs.Numeric1CircleOutline,
@@ -2390,6 +2394,36 @@ local function getSoundSystemSpeakerCount(connections)
     return count
 end
 
+---The three bands of a security network, counted the way `device:resolveSecurityNetwork` splits the
+---system's own connections: areas and communities by class, everything else a driven device.
+---@param connections table[]?
+---@return number, number, number
+local function getSecurityNetworkCounts(connections)
+    local areaCount = 0
+    local communityCount = 0
+    local deviceCount = 0
+
+    for _, connection in ipairs(connections or {}) do
+        if type(connection) == "table" then
+            local className = utils.sanitizeText(connection.deviceClassName)
+
+            if className == SECURITY_AREA_CONTROLLER_CLASS then
+                if utils.sanitizeText(connection.nodeRef) ~= "" then
+                    areaCount = areaCount + 1
+                end
+            elseif className == COMMUNITY_PROXY_CLASS then
+                if utils.sanitizeText(connection.nodeRef) ~= "" then
+                    communityCount = communityCount + 1
+                end
+            elseif className ~= "" then
+                deviceCount = deviceCount + 1
+            end
+        end
+    end
+
+    return areaCount, communityCount, deviceCount
+end
+
 function spawnedUI.refreshStateIconCaches()
     if spawnedUI.stateIconCacheEpoch == spawnedUI.cacheEpoch and spawnedUI.stateIconWireframeEpoch == spawnedUI.wireframeEpoch then
         return
@@ -2580,6 +2614,40 @@ function spawnedUI.getStateIcons(element)
                     and "No speaker connected, nothing will be audible"
                     or string.format("%d speaker%s connected", speakerCount, speakerCount == 1 and "" or "s"),
                 speakerCount == 0 and STATE_COLOR_ORANGE or style.mutedColor
+            )
+        end
+
+        -- A security system is only ever the hub of its network: the areas it watches, the
+        -- communities whose attitude it flips and the devices it drives all hang off its own
+        -- connection list, so the three counts say at a glance which band is still empty.
+        if spawnable.modulePath == "entity/device" and tostring(spawnable.deviceClassName or "") == SECURITY_SYSTEM_CONTROLLER_CLASS then
+            local areaCount, communityCount, deviceCount = getSecurityNetworkCounts(spawnable.deviceConnections)
+
+            addStateIcon(
+                stateIcons,
+                string.format("%d%s", areaCount, securitySystemData.AREA_ICON),
+                areaCount == 0
+                    and "No area on this system, so it has nothing to watch"
+                    or string.format("%d area%s watched by this system", areaCount, areaCount == 1 and "" or "s"),
+                areaCount == 0 and STATE_COLOR_ORANGE or style.mutedColor
+            )
+
+            addStateIcon(
+                stateIcons,
+                string.format("%d%s", communityCount, securitySystemData.COMMUNITY_ICON),
+                communityCount == 0
+                    and "No community linked, so no attitude is changed"
+                    or string.format("%d communit%s linked", communityCount, communityCount == 1 and "y" or "ies"),
+                style.mutedColor
+            )
+
+            addStateIcon(
+                stateIcons,
+                string.format("%d%s", deviceCount, IconGlyphs.Cctv),
+                deviceCount == 0
+                    and "No device driven by this system"
+                    or string.format("%d device%s driven by this system", deviceCount, deviceCount == 1 and "" or "s"),
+                style.mutedColor
             )
         end
 
