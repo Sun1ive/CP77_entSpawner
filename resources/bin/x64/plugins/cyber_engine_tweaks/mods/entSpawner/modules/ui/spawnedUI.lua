@@ -3062,7 +3062,7 @@ function spawnedUI.drawSideButtons(element, rowHovered)
 
     local exportDisabled = element.exportDisabled == true
     local exportIcon = exportDisabled and IconGlyphs.Cancel or IconGlyphs.Export
-    style.pushStyleColor(exportDisabled, ImGuiCol.Text, style.mutedColor)
+    style.pushStyleColor(exportDisabled, ImGuiCol.Text, 1.0, 0.84, 0.2, 1.0)
     ImGui.SetNextItemAllowOverlap()
     ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, sideButtonPadding, sideButtonPadding)
     if ImGui.Button(exportIcon) then
