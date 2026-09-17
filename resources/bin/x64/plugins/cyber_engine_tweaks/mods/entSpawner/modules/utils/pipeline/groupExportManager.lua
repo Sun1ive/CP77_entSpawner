@@ -496,10 +496,7 @@ end
 local function buildSidecarDocument(runtime)
     local sidecarDocument = groupExportSidecar.createDocument(
         runtime.project.name,
-        runtime.project.version,
-        {
-            ignoreHiddenDuringExport = runtime.request and runtime.request.ignoreHiddenDuringExport == true
-        }
+        runtime.project.version
     )
 
     for _, group in ipairs(runtime.groups or {}) do
@@ -1113,8 +1110,7 @@ function groupExportManager.start(request)
         collectMissingSplineNodeRefs = request.collectMissingSplineNodeRefs,
         collectDuplicateNodeRefs = request.collectDuplicateNodeRefs,
         collectInfinitePatrolWorkspots = request.collectInfinitePatrolWorkspots,
-        hasBlockingIssues = request.hasBlockingIssues,
-        ignoreHiddenDuringExport = request.ignoreHiddenDuringExport == true
+        hasBlockingIssues = request.hasBlockingIssues
     }
 
     local legacyMigrated, legacyDidMigrate, legacySidecarPath, currentSidecarPath = groupExportSidecar.migrateLegacySidecar(runtime.project.name)
@@ -1143,8 +1139,7 @@ function groupExportManager.start(request)
             cachedSector = nil
         }
         mappedGroup.signature = groupExportSidecar.buildGroupSignature(mappedGroup, {
-            version = request.version,
-            ignoreHiddenDuringExport = runtime.request.ignoreHiddenDuringExport
+            version = request.version
         })
 
         table.insert(runtime.groups, mappedGroup)

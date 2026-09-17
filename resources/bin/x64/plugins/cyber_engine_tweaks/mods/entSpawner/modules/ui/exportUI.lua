@@ -2248,7 +2248,7 @@ local function shouldExportNode(node)
         return false
     end
 
-    return not settings.ignoreHiddenDuringExport and (not utils.isA(node.parent, "randomizedGroup") or node.visible) or node.visible
+    return not utils.isA(node.parent, "randomizedGroup") or node.visible
 end
 
 function exportUI.exportGroup(group)
@@ -2433,8 +2433,7 @@ function exportUI.export(mode)
         collectInfinitePatrolWorkspots = collectInfinitePatrolWorkspots,
         writeInteractionTweak = exportUI.writeInteractionTweak,
         hasBlockingIssues = exportUI.hasBlockingIssues,
-        mode = exportMode,
-        ignoreHiddenDuringExport = settings.ignoreHiddenDuringExport == true
+        mode = exportMode
     })
 end
 

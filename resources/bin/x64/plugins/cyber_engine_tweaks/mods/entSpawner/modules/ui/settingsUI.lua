@@ -1566,9 +1566,6 @@ function settingsUI.draw(spawner)
         settings.despawnOnReload, changed = ImGui.Checkbox("Despawn everything on \"Reload all mods\"", settings.despawnOnReload)
         if changed then settings.save() end
 
-        settings.ignoreHiddenDuringExport, changed = ImGui.Checkbox("Ignore hidden elements during export", settings.ignoreHiddenDuringExport)
-        if changed then settings.save() end
-
         ImGui.TreePop()
     end
 
