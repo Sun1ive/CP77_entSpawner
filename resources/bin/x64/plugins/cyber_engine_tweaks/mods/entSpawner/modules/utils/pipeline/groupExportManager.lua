@@ -38,6 +38,7 @@ local function createExportRuntime(previous)
             unchanged = 0,
             removed = 0
         },
+        disabledNodeCount = 0,
         request = nil,
         buildChunkSize = buildChunkSize,
         buildTimeBudgetMs = buildTimeBudgetMs,
@@ -495,10 +496,7 @@ end
 local function buildSidecarDocument(runtime)
     local sidecarDocument = groupExportSidecar.createDocument(
         runtime.project.name,
-        runtime.project.version,
-        {
-            ignoreHiddenDuringExport = runtime.request and runtime.request.ignoreHiddenDuringExport == true
-        }
+        runtime.project.version
     )
 
     for _, group in ipairs(runtime.groups or {}) do
@@ -583,6 +581,11 @@ local function shouldExportNode(runtime, node)
     return true
 end
 
+local function isExportDisabled(runtime, node)
+    local check = runtime and runtime.request and runtime.request.isExportDisabled
+    return check and check(node) or false
+end
+
 local function prepareCurrentGroupForExport(runtime)
     local current = runtime.current
     if not current or not current.root then
@@ -644,7 +647,9 @@ local function prepareCurrentGroupForExport(runtime)
     end
 
     for _, node in ipairs(current.spawnables) do
-        if utils.isA(node, "spawnableElement") and not node.spawnable.noExport and shouldExportNode(runtime, node) then
+        if utils.isA(node, "spawnableElement") and not node.spawnable.noExport and isExportDisabled(runtime, node) then
+            runtime.disabledNodeCount = runtime.disabledNodeCount + 1
+        elseif utils.isA(node, "spawnableElement") and not node.spawnable.noExport and shouldExportNode(runtime, node) then
             if node.parent == root then
                 table.insert(variantNodes.default, { ref = node })
             else
@@ -780,6 +785,9 @@ local function finalizeExportRuntime(runtime)
             toastKind = "success"
             toastDuration = 2500
             toastMessage = string.format("Exported \"%s\"", projectLabel)
+            if runtime.disabledNodeCount > 0 then
+                toastMessage = toastMessage .. string.format(" (%d disabled node%s excluded)", runtime.disabledNodeCount, runtime.disabledNodeCount == 1 and "" or "s")
+            end
             logger:info("[Group Export Manager] " .. toastMessage)
         else
             toastKind = "error"
@@ -1102,8 +1110,7 @@ function groupExportManager.start(request)
         collectMissingSplineNodeRefs = request.collectMissingSplineNodeRefs,
         collectDuplicateNodeRefs = request.collectDuplicateNodeRefs,
         collectInfinitePatrolWorkspots = request.collectInfinitePatrolWorkspots,
-        hasBlockingIssues = request.hasBlockingIssues,
-        ignoreHiddenDuringExport = request.ignoreHiddenDuringExport == true
+        hasBlockingIssues = request.hasBlockingIssues
     }
 
     local legacyMigrated, legacyDidMigrate, legacySidecarPath, currentSidecarPath = groupExportSidecar.migrateLegacySidecar(runtime.project.name)
@@ -1132,8 +1139,7 @@ function groupExportManager.start(request)
             cachedSector = nil
         }
         mappedGroup.signature = groupExportSidecar.buildGroupSignature(mappedGroup, {
-            version = request.version,
-            ignoreHiddenDuringExport = runtime.request.ignoreHiddenDuringExport
+            version = request.version
         })
 
         table.insert(runtime.groups, mappedGroup)

@@ -2232,8 +2232,23 @@ function exportUI.handleCommunities(projectName, communities, spotNodes, nodeRef
     }
 end
 
+local function isExportDisabled(node)
+    while node do
+        if node.exportDisabled == true then
+            return true
+        end
+        node = node.parent
+    end
+
+    return false
+end
+
 local function shouldExportNode(node)
-    return not settings.ignoreHiddenDuringExport and (not utils.isA(node.parent, "randomizedGroup") or node.visible) or node.visible
+    if isExportDisabled(node) then
+        return false
+    end
+
+    return not utils.isA(node.parent, "randomizedGroup") or node.visible
 end
 
 function exportUI.exportGroup(group)
@@ -2410,6 +2425,7 @@ function exportUI.export(mode)
         groups = exportUI.groups,
         sectorCategory = sectorCategory,
         shouldExportNode = shouldExportNode,
+        isExportDisabled = isExportDisabled,
         handleDevice = exportUI.handleDevice,
         handleCommunities = exportUI.handleCommunities,
         collectMissingSplineNodeRefs = collectMissingSplineNodeRefs,
@@ -2417,8 +2433,7 @@ function exportUI.export(mode)
         collectInfinitePatrolWorkspots = collectInfinitePatrolWorkspots,
         writeInteractionTweak = exportUI.writeInteractionTweak,
         hasBlockingIssues = exportUI.hasBlockingIssues,
-        mode = exportMode,
-        ignoreHiddenDuringExport = settings.ignoreHiddenDuringExport == true
+        mode = exportMode
     })
 end
 

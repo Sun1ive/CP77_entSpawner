@@ -116,7 +116,6 @@ function groupExportSidecar.buildGroupSignature(group, options)
 
     table.insert(parts, "sourceRevision=" .. groupExportSidecar.resolveGroupSourceRevision(groupExportSidecar.resolveGroupFileName(group)))
     table.insert(parts, "scriptVersion=" .. tostring(opts.version or ""))
-    table.insert(parts, "ignoreHiddenDuringExport=" .. ((opts.ignoreHiddenDuringExport and true) and "1" or "0"))
     table.insert(parts, "name=" .. tostring(group and group.name or ""))
     table.insert(parts, "fileName=" .. groupExportSidecar.resolveGroupFileName(group))
     table.insert(parts, "category=" .. tostring(group and group.category or ""))
@@ -193,16 +192,12 @@ end
 
 ---@param projectName string
 ---@param version string
----@param exportSettings table?
 ---@return table
-function groupExportSidecar.createDocument(projectName, version, exportSettings)
+function groupExportSidecar.createDocument(projectName, version)
     return {
         schemaVersion = groupExportSidecar.SCHEMA_VERSION,
         projectName = projectName,
         version = version,
-        exportSettings = {
-            ignoreHiddenDuringExport = exportSettings and exportSettings.ignoreHiddenDuringExport == true or false
-        },
         groups = {}
     }
 end

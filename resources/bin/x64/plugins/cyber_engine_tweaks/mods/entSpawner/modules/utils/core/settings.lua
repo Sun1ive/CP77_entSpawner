@@ -55,7 +55,6 @@ local config = require("modules/utils/core/config")
 ---@field public assetFavoritesGroupOpen table
 ---@field public mainWindowName string
 ---@field public draggingThreshold number
----@field public ignoreHiddenDuringExport boolean
 ---@field public cameraMovementSpeed number
 ---@field public cameraRotateSpeed number
 ---@field public cameraZoomSpeed number
@@ -151,7 +150,6 @@ local settingsData = {
     spawnNewVisualizerEnabledByModule = {},
     mainWindowName = "World Builder",
     draggingThreshold = 5,
-    ignoreHiddenDuringExport = false,
     cameraMovementSpeed = 4,
     cameraRotateSpeed = 0.4,
     cameraZoomSpeed = 2.75,
@@ -250,6 +248,7 @@ function settingsFNs.load()
     data = config.loadFile("data/config.json")
     data.tabSizes = nil
     data.headerState = nil
+    data.ignoreHiddenDuringExport = nil
     for k, v in pairs(data) do
         settingsData[k] = v
     end

@@ -99,6 +99,8 @@ spawnedUI = {
     reorderPreview = nil,
 
     lockedChildrenCache = {},
+    excludedChildrenCache = {},
+    exportDisabledByParentCache = {},
     cacheDirty = true,
     lastCachedFilter = nil,
     cacheEpoch = 0,
@@ -347,20 +349,31 @@ local function drawSelectedVisualizerToggleTooltip()
     ImGui.EndTooltip()
 end
 
+---Caches the state a row can only know from its subtree or its ancestors: whether anything below it
+---is locked or excluded from export, and whether a parent already excludes it.
 ---@param root element
----@return boolean
-local function cacheLockedChildrenRecursive(root)
+---@param exportDisabledByParent boolean Whether any ancestor of `root` is excluded from export.
+---@return boolean hasLockedDescendant, boolean hasExcludedDescendant
+local function cacheDerivedChildStatesRecursive(root, exportDisabledByParent)
     local hasLockedDescendant = false
+    local hasExcludedDescendant = false
+    local childsExportDisabledByParent = exportDisabledByParent or root.exportDisabled == true
 
     for _, child in pairs(root.childs) do
-        local childSubtreeHasLocked = cacheLockedChildrenRecursive(child)
+        local childSubtreeHasLocked, childSubtreeHasExcluded = cacheDerivedChildStatesRecursive(child, childsExportDisabledByParent)
         if child:isLocked() or childSubtreeHasLocked then
             hasLockedDescendant = true
+        end
+        if child.exportDisabled == true or childSubtreeHasExcluded then
+            hasExcludedDescendant = true
         end
     end
 
     spawnedUI.lockedChildrenCache[root.id] = hasLockedDescendant
-    return hasLockedDescendant
+    spawnedUI.excludedChildrenCache[root.id] = hasExcludedDescendant
+    spawnedUI.exportDisabledByParentCache[root.id] = exportDisabledByParent
+
+    return hasLockedDescendant, hasExcludedDescendant
 end
 
 ---@param parent element
@@ -456,6 +469,8 @@ function spawnedUI.cachePaths()
     spawnedUI.visiblePaths = {}
     spawnedUI.visiblePathIndexById = {}
     spawnedUI.lockedChildrenCache = {}
+    spawnedUI.excludedChildrenCache = {}
+    spawnedUI.exportDisabledByParentCache = {}
     spawnedUI.filteredWidestName = 0
     spawnedUI.nameBeingEdited = false
     local pathById = {}
@@ -495,7 +510,7 @@ function spawnedUI.cachePaths()
     restoreSpawnNewTarget(spawnUI, spawnNewTargetRef, spawnNewTargetId)
 
     cacheVisiblePathsRecursive(spawnedUI.root, 0, pathById)
-    cacheLockedChildrenRecursive(spawnedUI.root)
+    cacheDerivedChildStatesRecursive(spawnedUI.root, false)
 
     spawnedUI.cacheDirty = false
     spawnedUI.lastCachedFilter = spawnedUI.filter
@@ -2101,7 +2116,8 @@ function spawnedUI.getSideButtonsWidth(element)
         getButtonWidth(IconGlyphs.EyeOffOutline),
         getButtonWidth(IconGlyphs.EyeRemoveOutline)
     )
-    local totalX = visibilityWidth + lockWidth + ImGui.GetStyle().ItemSpacing.x
+    local exportWidth = math.max(getButtonWidth(IconGlyphs.Export), getButtonWidth(IconGlyphs.Cancel))
+    local totalX = visibilityWidth + lockWidth + exportWidth + ImGui.GetStyle().ItemSpacing.x * 2
     if spawnedUI.canToggleVisualization(element) then
         local visualizationWidth = math.max(getButtonWidth(IconGlyphs.HospitalMarker), getButtonWidth(IconGlyphs.MapMarkerOffOutline))
         totalX = totalX + visualizationWidth + ImGui.GetStyle().ItemSpacing.x
@@ -2961,6 +2977,21 @@ end
 
 ---@protected
 ---@param element element
+---@return boolean
+function spawnedUI.hasExcludedChildren(element)
+    if not utils.isA(element, "positionableGroup") then return false end
+    return spawnedUI.excludedChildrenCache[element.id] == true
+end
+
+---@protected
+---@param element element
+---@return boolean
+function spawnedUI.isExportDisabledByParent(element)
+    return spawnedUI.exportDisabledByParentCache[element.id] == true
+end
+
+---@protected
+---@param element element
 ---@param rowHovered boolean?
 function spawnedUI.drawSideButtons(element, rowHovered)
     -- Right side buttons
@@ -3059,6 +3090,37 @@ function spawnedUI.drawSideButtons(element, rowHovered)
         ImGui.SameLine()
     end
 
+    local exportDisabled = element.exportDisabled == true
+    local exportDisabledByParent = not exportDisabled and spawnedUI.isExportDisabledByParent(element)
+    local hasExcludedChildren = not exportDisabled and not exportDisabledByParent and spawnedUI.hasExcludedChildren(element)
+    -- Inherited exclusion keeps the excluded icon but stays muted, so only an element's own state is highlighted.
+    local exportIcon = (exportDisabled or exportDisabledByParent) and IconGlyphs.Cancel or IconGlyphs.Export
+    if exportDisabled then
+        ImGui.PushStyleColor(ImGuiCol.Text, 1.0, 0.84, 0.2, 1.0)
+    elseif hasExcludedChildren then
+        ImGui.PushStyleColor(ImGuiCol.Text, 1.0, 0.55, 0.0, 0.6)
+    else
+        ImGui.PushStyleColor(ImGuiCol.Text, style.mutedColor)
+    end
+    ImGui.SetNextItemAllowOverlap()
+    ImGui.PushStyleVar(ImGuiStyleVar.FramePadding, sideButtonPadding, sideButtonPadding)
+    if ImGui.Button(exportIcon) then
+        element:setExportDisabled(not exportDisabled)
+    end
+    ImGui.PopStyleVar()
+    ImGui.PopStyleColor()
+    local exportTooltip = exportDisabled and "Include in export" or "Exclude from export"
+    if utils.isA(element, "positionableGroup") then
+        exportTooltip = exportTooltip .. "\nDisabled groups exclude every child from export."
+    end
+    if exportDisabledByParent then
+        exportTooltip = exportTooltip .. "\nAlready excluded by a parent group."
+    elseif hasExcludedChildren then
+        exportTooltip = exportTooltip .. "\nContains excluded children."
+    end
+    style.tooltip(exportTooltip)
+    ImGui.SameLine()
+
     local icon = elementLocked and IconGlyphs.LockOutline or IconGlyphs.LockOpenVariantOutline
     local canToggleLock = spawnedUI.canMutateLockedState(element)
     local hasLockedChildren = spawnedUI.hasLockedChildren(element) and not elementLocked
@@ -3110,7 +3172,11 @@ function spawnedUI.drawSideButtons(element, rowHovered)
     end
     ImGui.PopStyleVar()
     style.popStyleColor(not visible)
-
+    local visibilityTooltip = visible and "Hide element" or "Show element"
+    if visible and element.hiddenByParent then
+        visibilityTooltip = visibilityTooltip .. "\nHidden by parent."
+    end
+    style.tooltip(visibilityTooltip)
 end
 
 ---@protected
@@ -3252,7 +3318,8 @@ function spawnedUI.drawElement(entry, dummy, rowIndex, sticky)
     local secondaryIcon = element.secondaryIcon or ""
     local leftOffset = 25 * style.viewSize -- Accounts for primary icon and/or expand button
     local hiddenText = not element.visible
-    style.pushStyleColor(hiddenText, ImGuiCol.Text, style.mutedColor)
+    local mutedText = hiddenText or element.exportDisabled == true
+    style.pushStyleColor(mutedText, ImGuiCol.Text, style.mutedColor)
     local projectTag = projectTagUtil.getRootGroupTag(element)
     local stateIcons = spawnedUI.getStateIcons(element)
     local projectTagWidth = spawnedUI.getProjectTagWidth(projectTag)
@@ -3377,7 +3444,7 @@ function spawnedUI.drawElement(entry, dummy, rowIndex, sticky)
         spawnedUI.drawStateIcons(stateIcons)
         spawnedUI.drawProjectTag(projectTag)
     end
-    style.popStyleColor(hiddenText)
+    style.popStyleColor(mutedText)
 
     if isHovered and ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) then
         if not element:isLocked() and not element.lockedRename then
